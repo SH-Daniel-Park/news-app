@@ -1,324 +1,346 @@
-#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-news_aggregator.py
-
-설명 (한국어):
-키워드(또는 키워드 리스트)를 입력하면 여러 뉴스 소스(NewsAPI, Google News RSS, 사용자 지정 RSS 피드들)에서 관련 기사를 모아
-중복 제거 후 정렬하여 출력하는 파이썬 프로그램입니다.
-
-특징:
-- NewsAPI (선택 사항): API 키를 넣으면 NewsAPI에서 기사 검색.
-- Google News RSS: 키워드 검색을 RSS로 가져와서 기사 수집.
-- 사용자 지정 RSS 피드: 사용자가 목록에 원하는 언론사 RSS를 추가 가능.
-- 중복 제거: URL과 제목 유사도로 중복 제거.
-- 출력: JSON, CSV 또는 콘솔 출력 가능.
-
-사용법:
-1) 필요한 패키지 설치:
-   pip install -r requirements.txt
-   requirements.txt 내용:
-     requests
-     feedparser
-     python-dateutil
-
-2) 실행 예시:
-   python news_aggregator.py --query "재정정책" --max 50 --out results.json
-   또는 NewsAPI 키 사용:
-   python news_aggregator.py --query "코로나" --newsapi-key YOUR_KEY --out results.csv
-
-주의:
-- 일부 국내 언론사의 RSS URL은 변경될 수 있습니다. 필요하면 RSS 목록을 수정하세요.
-- NewsAPI는 유료 요금제/요청 제한이 있습니다.
-
+뉴스 수집/정제/요약/형태소 분석 유틸리티
+- Google News RSS + (선택) NewsAPI + (선택) 사용자 RSS 목록
+- 언론사(도메인) 필터
+- 본문 스크래핑(newspaper3k)
+- 간단 요약(TF-IDF 문장선정) + 한글 형태소(kiwipiepy) 기반 키워드 추출
 """
 
-import argparse
+from __future__ import annotations
+import re
+import time
+import math
+import json
+import html
+import hashlib
+import datetime as dt
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+
 import requests
 import feedparser
-import json
-import csv
-import time
-from datetime import datetime
-from dateutil import parser as dateparser
-from urllib.parse import quote_plus
-from difflib import SequenceMatcher
+from dateutil import parser as dtparser
+
+# 본문 추출
+from newspaper import Article
+
+# 요약/키워드
+from sklearn.feature_extraction.text import TfidfVectorizer
+import numpy as np
+
+try:
+    # 순수 파이썬, 설치 간편
+    from kiwipiepy import Kiwi
+    _kiwi = Kiwi()
+except Exception:
+    _kiwi = None  # 선택 기능 (설치 안 되어도 앱은 동작)
 
 
-# ----------------------------- 설정 (원하면 수정) -----------------------------
-# 기본 RSS 피드 예시 (한국 주요 언론 — URL은 변동될 수 있으니 필요하면 수정)
-DEFAULT_RSS_FEEDS = {
-    "chosun": "http://www.chosun.com/site/data/rss/rss.xml",
-    "joongang": "https://joongang.joins.com/rss/article/list.xml",
-    "donga": "http://rss.donga.com/total.xml",
-    "hani": "http://www.hani.co.kr/rss/" ,
-    "yonhap": "https://www.yna.co.kr/rss/" ,
-    "kbs": "http://feeds.kbs.co.kr/news",
-    # 더 추가 가능
-}
+USER_AGENT = "Mozilla/5.0 (compatible; NewsAggregator/1.0; +https://example.com)"
+REQUEST_TIMEOUT = 12
 
-# Google News RSS 템플릿 (지역 및 언어 옵션 포함)
-GOOGLE_NEWS_RSS_TEMPLATE = "https://news.google.com/rss/search?q={query}&hl=ko&gl=KR&ceid=KR:ko"
+def _http_get(url: str) -> requests.Response:
+    return requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT)
 
-SIMILARITY_THRESHOLD = 0.85  # 제목 유사도 임계값 (중복 판단)
+def normalize_url(url: str) -> str:
+    """URL 정규화 (스킴/호스트 소문자, 트래킹 파라미터 제거 등)"""
+    try:
+        p = urlparse(url)
+        q = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True)
+             if not k.lower().startswith(("utm_", "fbclid", "gclid", "icid"))]
+        p2 = p._replace(
+            scheme=p.scheme.lower() or "https",
+            netloc=p.netloc.lower(),
+            path=re.sub(r"/+$", "", p.path or ""),
+            query=urlencode(q, doseq=True),
+            fragment=""
+        )
+        return urlunparse(p2)
+    except Exception:
+        return url
 
-# ----------------------------- 유틸리티 함수 -----------------------------
+def extract_domain(url: str) -> str:
+    try:
+        netloc = urlparse(url).netloc.lower()
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        return netloc
+    except Exception:
+        return ""
 
-def similar(a: str, b: str) -> float:
-    """두 문자열의 유사도 비율(0~1) 반환"""
-    return SequenceMatcher(None, a, b).ratio()
-
-
-def normalize_text(s: str) -> str:
+def parse_date(s):
     if not s:
-        return ""
-    return ' '.join(s.replace('\n', ' ').split()).strip().lower()
+        return None
+    try:
+        return dtparser.parse(s)
+    except Exception:
+        return None
 
+def to_iso(ts):
+    if isinstance(ts, dt.datetime):
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=dt.timezone.utc)
+        return ts.astimezone(dt.timezone.utc).isoformat()
+    return None
 
-# ----------------------------- 수집 함수들 -----------------------------
+def item_hash(title: str, link: str) -> str:
+    return hashlib.sha1((title or "" + "|" + normalize_url(link or "")).encode("utf-8")).hexdigest()
 
-def search_google_news_rss(query: str, max_results=50):
-    """Google News RSS를 사용해 결과를 가져옴"""
-    url = GOOGLE_NEWS_RSS_TEMPLATE.format(query=quote_plus(query))
-    print(f"[GoogleNewsRSS] fetching: {url}")
-    feed = feedparser.parse(url)
-    articles = []
-    for entry in feed.entries[:max_results]:
-        title = entry.get('title', '')
-        link = entry.get('link', '')
-        summary = entry.get('summary', '')
-        published = entry.get('published', entry.get('updated', ''))
-        try:
-            published_parsed = dateparser.parse(published) if published else None
-        except Exception:
-            published_parsed = None
-        articles.append({
-            'source': 'google_news_rss',
-            'title': title,
-            'link': link,
-            'summary': summary,
-            'published': published_parsed.isoformat() if published_parsed else None,
+# --- 수집기들 -----------------------------------------------------------------
+
+def search_google_news_rss(query: str, max_results: int = 50, lang="ko", region="KR"):
+    """
+    Google News RSS 기반 수집 (여러 언론사 기사 집계)
+    - 장점: 별도 키 불필요, 다양한 매체
+    - 단점: 품질/양은 시점에 따라 변동
+    """
+    # Google News RSS 검색 쿼리
+    rss_url = (
+        "https://news.google.com/rss/search?"
+        f"q={requests.utils.quote(query)}&hl={lang}&gl={region}&ceid={region}:{lang}"
+    )
+    feed = feedparser.parse(rss_url)
+    items = []
+    for e in feed.entries[:max_results]:
+        title = html.unescape(getattr(e, "title", "") or "")
+        link = normalize_url(getattr(e, "link", "") or "")
+        published = parse_date(getattr(e, "published", "") or "") or parse_date(getattr(e, "updated", "") or "")
+        source_title = getattr(getattr(e, "source", None), "title", None) or ""
+        publisher = source_title.strip() or extract_domain(link)
+        items.append({
+            "id": item_hash(title, link),
+            "title": title,
+            "link": link,
+            "publisher": publisher,
+            "published_at": to_iso(published),
+            "source": "google_news_rss",
         })
-    return articles
+    return items
 
-
-def fetch_from_rss_feeds(query: str, feeds: dict, max_per_feed=20):
-    """주어진 RSS 피드 목록을 순회하며 query가 제목/요약에 포함된 항목을 수집"""
-    found = []
-    for name, url in feeds.items():
-        try:
-            print(f"[RSS] fetching {name} -> {url}")
-            feed = feedparser.parse(url)
-            for entry in feed.entries[:max_per_feed]:
-                title = entry.get('title', '')
-                summary = entry.get('summary', '')
-                link = entry.get('link', '')
-                combined_text = (title + ' ' + summary).lower()
-                if query.lower() in combined_text:
-                    published = entry.get('published', entry.get('updated', ''))
-                    try:
-                        published_parsed = dateparser.parse(published) if published else None
-                    except Exception:
-                        published_parsed = None
-                    found.append({
-                        'source': name,
-                        'title': title,
-                        'link': link,
-                        'summary': summary,
-                        'published': published_parsed.isoformat() if published_parsed else None,
-                    })
-            time.sleep(0.2)  # 간단한 지연
-        except Exception as e:
-            print(f"  [WARN] RSS fetch error for {name}: {e}")
-    return found
-
-
-def search_newsapi(query: str, api_key: str, max_results=50):
-    """NewsAPI.org를 사용해 기사 수집 (api_key 필요)"""
-    if not api_key:
-        return []
-    url = 'https://newsapi.org/v2/everything'
+def search_newsapi(query: str, api_key: str, max_results: int = 50, lang="ko"):
+    """
+    NewsAPI 수집 (선택)
+    - https://newsapi.org
+    - 무료 플랜 제약이 있으니 필요 시만 사용
+    """
+    url = "https://newsapi.org/v2/everything"
     params = {
-        'q': query,
-        'pageSize': min(100, max_results),
-        'language': 'ko',
-        'sortBy': 'publishedAt',
-        'apiKey': api_key,
+        "q": query,
+        "language": lang,
+        "pageSize": min(100, max_results),
+        "sortBy": "publishedAt",
     }
-    print(f"[NewsAPI] querying NewsAPI for '{query}'")
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        articles = []
-        for it in data.get('articles', [])[:max_results]:
-            published = it.get('publishedAt')
-            articles.append({
-                'source': it.get('source', {}).get('name', 'newsapi'),
-                'title': it.get('title'),
-                'link': it.get('url'),
-                'summary': it.get('description'),
-                'published': published,
-            })
-        return articles
-    except Exception as e:
-        print(f"  [WARN] NewsAPI error: {e}")
-        return []
+    headers = {"X-Api-Key": api_key}
+    r = _http_get(url=url, )
+    r = requests.get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
+    r.raise_for_status()
+    data = r.json()
+    items = []
+    for a in data.get("articles", [])[:max_results]:
+        title = a.get("title") or ""
+        link = normalize_url(a.get("url") or "")
+        published = parse_date(a.get("publishedAt") or "")
+        publisher = (a.get("source") or {}).get("name") or extract_domain(link)
+        items.append({
+            "id": item_hash(title, link),
+            "title": html.unescape(title),
+            "link": link,
+            "publisher": publisher,
+            "published_at": to_iso(published),
+            "source": "newsapi",
+        })
+    return items
 
-
-# ----------------------------- 결과 통합 / 정렬 / 중복제거 -----------------------------
-
-def dedupe_and_merge(lists_of_articles):
-    merged = []
-    seen_urls = set()
-
-    for lst in lists_of_articles:
-        for a in lst:
-            if not a.get('link'):
-                # 링크 없으면 제목으로 판단
-                identifier = normalize_text(a.get('title', ''))
-            else:
-                identifier = a.get('link')
-
-            if identifier in seen_urls:
-                continue
-
-            # 제목 유사도 기준으로 중복 검사
-            is_dup = False
-            for ex in merged:
-                t1 = normalize_text(ex.get('title', ''))
-                t2 = normalize_text(a.get('title', ''))
-                if t1 and t2 and similar(t1, t2) >= SIMILARITY_THRESHOLD:
-                    is_dup = True
-                    # 더 최신 정보가 있으면 병합
-                    try:
-                        p_old = dateparser.parse(ex.get('published')) if ex.get('published') else None
-                        p_new = dateparser.parse(a.get('published')) if a.get('published') else None
-                        if p_new and (not p_old or p_new > p_old):
-                            ex.update(a)
-                    except Exception:
-                        pass
-                    break
-            if is_dup:
-                continue
-
-            merged.append(a)
-            if a.get('link'):
-                seen_urls.add(a.get('link'))
-
-    # 날짜순 정렬 (최신 -> 오래된)
-    def sort_key(x):
+def fetch_from_rss_feeds(query: str, feeds: list[str], max_per_feed: int = 20):
+    """
+    사용자 제공 RSS 피드에서 키워드 매칭(제목/요약에 포함)으로 수집
+    """
+    items = []
+    q = query.lower()
+    for feed_url in feeds:
         try:
-            return dateparser.parse(x.get('published')) if x.get('published') else datetime.min
+            fp = feedparser.parse(feed_url)
+            for e in fp.entries[:max_per_feed]:
+                title = html.unescape(getattr(e, "title", "") or "")
+                summary = html.unescape(getattr(e, "summary", "") or "")
+                if q not in (title + " " + summary).lower():
+                    continue
+                link = normalize_url(getattr(e, "link", "") or "")
+                published = parse_date(getattr(e, "published", "") or "") or parse_date(getattr(e, "updated", "") or "")
+                publisher = extract_domain(link) or (getattr(fp.feed, "title", "") or "").strip()
+                items.append({
+                    "id": item_hash(title, link),
+                    "title": title,
+                    "link": link,
+                    "publisher": publisher,
+                    "published_at": to_iso(published),
+                    "source": "rss",
+                })
         except Exception:
-            return datetime.min
+            continue
+    return items
 
-    merged.sort(key=sort_key, reverse=True)
-    return merged
+# 기본 RSS (샘플) — 실제 운영 시 최신 주소를 feeds.txt로 교체/보강하세요.
+DEFAULT_RSS_FEEDS = [
+    # 아래 목록은 예시입니다. 언론사 RSS 주소는 변동될 수 있으므로 feeds.txt로 관리 권장.
+    "https://www.hankyung.com/feed/all",  # 한국경제 (예시)
+    "https://www.mk.co.kr/rss/30000001/", # 매일경제 (예시)
+    "https://www.koreatimes.co.kr/www/rss/rss.xml",  # 코리아타임스 (예시)
+    "https://www.koreaherald.com/rss/020000000000.xml",  # 코리아헤럴드 (예시)
+]
 
-# --------------- 함수 추가 -----------
+def dedupe_and_merge(list_of_lists: list[list[dict]]):
+    """리스트 병합 + 중복 제거(정규화 URL/제목 기준) + 최신순 정렬"""
+    merged = {}
+    for lst in list_of_lists:
+        for it in lst:
+            key = normalize_url(it.get("link") or "") or it.get("id")
+            title = (it.get("title") or "").strip().lower()
+            dedupe_key = f"{key}::{title}"
+            if dedupe_key not in merged:
+                merged[dedupe_key] = it
+    arr = list(merged.values())
 
-#from newspaper3k import Article
+    def _ts(x):
+        d = parse_date(x.get("published_at"))
+        # 없으면 최신으로 가정하지 않도록 아주 오래전 날짜 부여
+        return d.timestamp() if d else 0.0
 
-def fetch_full_text(url):
-    """기사 본문 텍스트 크롤링"""
+    arr.sort(key=_ts, reverse=True)
+    return arr
+
+# --- 본문/요약/키워드 ----------------------------------------------------------
+
+def fetch_full_text(url: str) -> str:
+    """
+    기사 본문 텍스트 크롤링 (newspaper3k)
+    """
     try:
-        article = Article(url, language='ko')
-        article.download()
-        article.parse()
-        return article.text
-    except Exception as e:
-        print(f"[WARN] 본문 수집 실패: {e}")
+        art = Article(url, language='ko')
+        art.download()
+        art.parse()
+        text = (art.text or "").strip()
+        return text
+    except Exception:
         return ""
 
-# ----------------------------- 출력 함수 -----------------------------
+def _sent_tokenize_ko(text: str) -> list[str]:
+    # 매우 단순한 한국어 문장분리 (정확도보다 경량 선호)
+    text = re.sub(r"\s+", " ", text).strip()
+    sents = re.split(r"(?<=[\.!?]|다\.)\s+", text)
+    # 너무 짧은 문장 제거
+    return [s.strip() for s in sents if len(s.strip()) >= 10]
 
-def save_json(path, articles):
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(articles, f, ensure_ascii=False, indent=2)
-    print(f"Saved {len(articles)} articles to {path}")
+def summarize_text(text: str, max_sentences: int = 3) -> str:
+    if not text:
+        return ""
+    sents = _sent_tokenize_ko(text)
+    if not sents:
+        return text[:200] + ("..." if len(text) > 200 else "")
+    # TF-IDF로 각 문장 점수 → 상위 문장 조합
+    vect = TfidfVectorizer(max_features=5000)
+    X = vect.fit_transform(sents)
+    scores = np.asarray(X.sum(axis=1)).ravel()
+    idx = np.argsort(-scores)[:max_sentences]
+    idx_sorted = sorted(idx)  # 원문 순서 유지
+    return " ".join(sents[i] for i in idx_sorted)
 
+_KO_STOPWORDS = set("""
+그리고 그러나 하지만 또한 또는 그래서 이런 저런 그냥 매우 너무 상당히 더욱 더욱이 바로 이미 또한
+이것 그것 저것 여기 저기 우리 여러분 등의 등 등등 변화 대한 관련 관련해 대해서 경우 통해 대해
+""".split())
 
-def save_csv(path, articles):
-    keys = ['source', 'title', 'link', 'summary', 'published']
-    with open(path, 'w', encoding='utf-8-sig', newline='') as f:
-        w = csv.DictWriter(f, fieldnames=keys)
-        w.writeheader()
-        for a in articles:
-            w.writerow({k: a.get(k, '') for k in keys})
-    print(f"Saved {len(articles)} articles to {path}")
+def extract_keywords_ko(text: str, top_k: int = 20) -> list[str]:
+    if not text:
+        return []
+    if _kiwi is None:
+        # 형태소 분석기가 없으면 단어 빈도 기반(띄어쓰기)
+        words = re.findall(r"[가-힣A-Za-z0-9]{2,}", text)
+        freq = {}
+        for w in words:
+            wl = w.lower()
+            if wl in _KO_STOPWORDS:
+                continue
+            freq[wl] = freq.get(wl, 0) + 1
+        return [w for w, _ in sorted(freq.items(), key=lambda x: (-x[1], x[0]))[:top_k]]
 
+    # 명사/고유명사 위주 추출
+    tokens = _kiwi.tokenize(text)
+    freq = {}
+    for t in tokens:
+        if t.tag in ("NNG", "NNP"):  # 일반명사/고유명사
+            w = t.form.lower()
+            if w in _KO_STOPWORDS or len(w) <= 1:
+                continue
+            freq[w] = freq.get(w, 0) + 1
+    return [w for w, _ in sorted(freq.items(), key=lambda x: (-x[1], x[0]))[:top_k]]
 
-def print_console(articles, limit=20):
-    for i, a in enumerate(articles[:limit]):
-        print('-' * 80)
-        print(f"[{i+1}] {a.get('title')}")
-        print(f"source: {a.get('source')}")
-        print(f"published: {a.get('published')}")
-        print(f"link: {a.get('link')}")
-        s = a.get('summary') or ''
-        print(f"summary: {s[:400]}{'...' if len(s)>400 else ''}")
-    print('-' * 80)
-    print(f"Displayed {min(limit, len(articles))} of {len(articles)} articles")
+# --- 파이프라인 ---------------------------------------------------------------
 
-
-# ----------------------------- 메인 -----------------------------
-
-def main():
-    p = argparse.ArgumentParser(description='키워드로 여러 언론사 기사를 모아오는 도구')
-    p.add_argument('--query', '-q', required=True, help='검색 키워드 (따옴표 권장)')
-    p.add_argument('--newsapi-key', help='(선택) NewsAPI.org API 키')
-    p.add_argument('--max', type=int, default=100, help='최대 기사 수(전체)')
-    p.add_argument('--out', help='출력 파일 (json/csv). 없으면 콘솔로 출력')
-    p.add_argument('--feeds', help='사용자 RSS 피드 파일(.txt) — 각 줄에 name|url', default=None)
-    args = p.parse_args()
-
-    q = args.query
+def collect_articles(
+    query: str,
+    max_results: int = 50,
+    newsapi_key: str | None = None,
+    rss_feeds: list[str] | None = None,
+):
+    """
+    수집 파이프라인: GoogleNewsRSS → NewsAPI(선택) → 사용자 RSS(선택)
+    """
     results = []
-    remaining = args.max
+    remain = max_results
 
-    # 1) NewsAPI (선택)
-    if args.newsapi_key:
-        na = search_newsapi(q, args.newsapi_key, max_results=remaining)
-        results.append(na)
-        remaining = max(0, remaining - len(na))
+    # Google News RSS
+    g = search_google_news_rss(query, max_results=remain)
+    results.append(g)
+    remain = max(0, remain - len(g))
 
-    # 2) Google News RSS
-    if remaining > 0:
-        g = search_google_news_rss(q, max_results=remaining)
-        results.append(g)
-        remaining = max(0, remaining - len(g))
-
-    # 3) 사용자 또는 기본 RSS 피드
-    feeds = DEFAULT_RSS_FEEDS.copy()
-    if args.feeds:
+    # NewsAPI (선택)
+    if remain > 0 and newsapi_key:
         try:
-            with open(args.feeds, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith('#'):
-                        continue
-                    if '|' in line:
-                        name, url = line.split('|', 1)
-                        feeds[name.strip()] = url.strip()
-        except Exception as e:
-            print(f"[WARN] feeds file error: {e}")
-    if remaining > 0 and feeds:
-        rr = fetch_from_rss_feeds(q, feeds, max_per_feed=20)
-        results.append(rr)
+            n = search_newsapi(query, newsapi_key, max_results=remain)
+            results.append(n)
+            remain = max(0, remain - len(n))
+        except Exception:
+            pass
+
+    # 사용자 RSS (선택)
+    if remain > 0 and rss_feeds:
+        r = fetch_from_rss_feeds(query, rss_feeds, max_per_feed=20)
+        results.append(r)
 
     merged = dedupe_and_merge(results)
+    return merged
 
-    # 출력
-    if args.out:
-        if args.out.lower().endswith('.json'):
-            save_json(args.out, merged)
-        elif args.out.lower().endswith('.csv'):
-            save_csv(args.out, merged)
-        else:
-            print_console(merged)
-    else:
-        print_console(merged)
+def enrich_with_content(items: list[dict], do_fetch_text=True, do_summarize=True, do_keywords=True,
+                        summary_sentences=3):
+    """
+    기사 본문/요약/키워드 추가
+    """
+    enriched = []
+    for it in items:
+        rec = dict(it)
+        text = ""
+        if do_fetch_text:
+            text = fetch_full_text(rec["link"])
+            rec["content"] = text
+        if do_summarize:
+            rec["summary"] = summarize_text(text, max_sentences=summary_sentences) if text else ""
+        if do_keywords:
+            rec["keywords"] = extract_keywords_ko(text, top_k=20) if text else []
+        enriched.append(rec)
+    return enriched
 
-
-if __name__ == '__main__':
-    main()
+def filter_by_publishers(items: list[dict], allow_publishers: list[str] | None):
+    """
+    allow_publishers: 허용할 언론사/도메인 목록 (소문자 비교)
+    """
+    if not allow_publishers:
+        return items
+    allow = {p.lower().strip() for p in allow_publishers if p.strip()}
+    out = []
+    for it in items:
+        pub = (it.get("publisher") or "").lower()
+        dom = extract_domain(it.get("link") or "")
+        if pub in allow or dom in allow:
+            out.append(it)
+    return out

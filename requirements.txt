@@ -1,3 +1,8 @@
+streamlit
+pandas
 requests
 feedparser
 python-dateutil
+newspaper3k
+scikit-learn
+kiwipiepy
