@@ -101,15 +101,22 @@ if run:
 
     # 표로 표시
     df = pd.DataFrame(enriched)
+
+    # 링크를 클릭 가능하게 변환
+    df["link"] = df["link"].apply(lambda x: f"[바로가기]({x})" if pd.notnull(x) and x.strip() else "")
+
     # 표시용 열 정리
     display_cols = ["title", "publisher", "published_at", "link"]
     if do_summarize:
         display_cols.append("summary")
     if do_keywords:
         display_cols.append("keywords")
-    st.success(f"총 {len(df)}건의 기사를 확보했습니다.")
-    st.dataframe(df[display_cols], use_container_width=True, height=520)
 
+    st.success(f"총 {len(df)}건의 기사를 확보했습니다.")
+
+    # st.markdown을 사용하면 링크 클릭 가능
+    st.markdown(df[display_cols].to_markdown(index=False), unsafe_allow_html=True)
+    
     # 상세 보기
     st.markdown("### 세부 기사 보기")
     titles = ["(선택)"] + df["title"].tolist()
