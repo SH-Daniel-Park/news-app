@@ -22,7 +22,22 @@ import feedparser
 from dateutil import parser as dtparser
 
 # 본문 추출
-from newspaper import Article
+# from newspaper import Article
+# 
+# 본문 추출: trafilatura 우선, 실패 시 간단 백업 절차
+try:
+    import trafilatura
+    _has_trafilatura = True
+except Exception:
+    _has_trafilatura = False
+
+from bs4 import BeautifulSoup
+try:
+    from readability import Document  # 백업용
+except Exception:
+    Document = None
+
+
 
 # 요약/키워드
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -210,19 +225,64 @@ def dedupe_and_merge(list_of_lists: list[list[dict]]):
     return arr
 
 # --- 본문/요약/키워드 ----------------------------------------------------------
-
 def fetch_full_text(url: str) -> str:
     """
-    기사 본문 텍스트 크롤링 (newspaper3k)
+    기사 본문 텍스트 크롤링
+    - 1순위: trafilatura (안정/정확)
+    - 백업: requests + readability-lxml + BeautifulSoup
     """
+    # 1) trafilatura 시도
+    if _has_trafilatura:
+        try:
+            downloaded = trafilatura.fetch_url(url, no_ssl=True, user_agent=USER_AGENT, timeout=REQUEST_TIMEOUT)
+            if downloaded:
+                text = trafilatura.extract(
+                    downloaded,
+                    include_comments=False,
+                    include_tables=False,
+                    favor_recall=False,
+                    url=url,
+                )
+                if text and text.strip():
+                    return text.strip()
+        except Exception:
+            pass
+
+    # 2) 백업: requests + readability + BS4
     try:
-        art = Article(url, language='ko')
-        art.download()
-        art.parse()
-        text = (art.text or "").strip()
-        return text
+        r = _http_get(url)
+        r.raise_for_status()
+        html_txt = r.text
+        if Document is not None:
+            try:
+                doc = Document(html_txt)
+                content_html = doc.summary()
+                soup = BeautifulSoup(content_html, "html.parser")
+                text = soup.get_text("\n", strip=True)
+                if text and len(text) > 120:  # 너무 짧으면 실패로 간주
+                    return text
+            except Exception:
+                pass
+
+        # 최후: 전체 HTML에서 텍스트만 추출
+        soup = BeautifulSoup(html_txt, "html.parser")
+        text = soup.get_text("\n", strip=True)
+        return text[:5000]  # 너무 길어지는 것 방지
     except Exception:
         return ""
+
+#def fetch_full_text(url: str) -> str:
+#    """
+#    기사 본문 텍스트 크롤링 (newspaper3k)
+#    """
+#    try:
+#        art = Article(url, language='ko')
+#        art.download()
+#        art.parse()
+#        text = (art.text or "").strip()
+#        return text
+#    except Exception:
+#        return ""
 
 def _sent_tokenize_ko(text: str) -> list[str]:
     # 매우 단순한 한국어 문장분리 (정확도보다 경량 선호)
