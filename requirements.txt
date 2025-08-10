@@ -1,8 +1,10 @@
-streamlit
-pandas
 requests
 feedparser
 python-dateutil
-newspaper3k
+trafilatura>=1.6.3
+readability-lxml
+beautifulsoup4
+tldextract
+numpy
 scikit-learn
 kiwipiepy
