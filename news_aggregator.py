@@ -284,12 +284,24 @@ def fetch_full_text(url: str) -> str:
 #    except Exception:
 #        return ""
 
+#def _sent_tokenize_ko(text: str) -> list[str]:
+    # 매우 단순한 한국어 문장분리 (정확도보다 경량 선호)
+#    text = re.sub(r"\s+", " ", text).strip()
+#    sents = re.split(r"(?<=[\.!?]|다\.)\s+", text)
+    # 너무 짧은 문장 제거
+#    return [s.strip() for s in sents if len(s.strip()) >= 10]
+
 def _sent_tokenize_ko(text: str) -> list[str]:
     # 매우 단순한 한국어 문장분리 (정확도보다 경량 선호)
     text = re.sub(r"\s+", " ", text).strip()
-    sents = re.split(r"(?<=[\.!?]|다\.)\s+", text)
+    MARK = "§¶§"  # 거의 안 나올 구분자
+    # 문장 끝 패턴 뒤에 구분자 삽입
+    text = re.sub(r"(다\.|[.!?])\s+", r"\1" + MARK, text)
+    sents = [s.strip() for s in text.split(MARK)]
     # 너무 짧은 문장 제거
-    return [s.strip() for s in sents if len(s.strip()) >= 10]
+    return [s for s in sents if len(s) >= 10]
+
+
 
 def summarize_text(text: str, max_sentences: int = 3) -> str:
     if not text:
