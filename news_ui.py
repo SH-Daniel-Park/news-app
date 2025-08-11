@@ -68,6 +68,19 @@ with st.sidebar:
     run = st.button("🔎 수집 시작", use_container_width=True)
 
 # --------------------------- 실행 ---------------------------
+def _to_yyyymmdd(s: str) -> str:
+    if not s or pd.isna(s):
+        return ""
+    try:
+        d = pd.to_datetime(s, errors="coerce", utc=True)
+        if pd.isna(d):
+            d = pd.to_datetime(s, errors="coerce")  # try naive
+        if pd.isna(d):
+            return ""
+        return d.strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
 if run:
     if not query.strip():
         st.warning("키워드를 입력하세요.")
@@ -133,23 +146,27 @@ if run:
 
     df = pd.DataFrame(enriched)
 
-    # 화면 표시는 URL 제외
+    # 화면 표시는 URL 제외 + 날짜 YYYY-MM-DD 표준화
+    df_display = df.copy()
+    if "published_at" in df_display.columns:
+        df_display["published_at"] = df_display["published_at"].map(_to_yyyymmdd)
+
     display_cols = ["title", "publisher", "published_at"]
     if do_summarize:
         display_cols.append("summary")
     if do_keywords:
         display_cols.append("keywords")
 
-    st.success(f"총 {len(df)}건의 기사를 확보했습니다.")
-    st.dataframe(df[display_cols], use_container_width=True, height=520)
+    st.success(f"총 {len(df_display)}건의 기사를 확보했습니다.")
+    st.dataframe(df_display[display_cols], use_container_width=True, height=520)
 
-    # 내부 링크 시리즈(엑셀/PDf에서 제목 하이퍼링크 생성용)
+    # 내부 링크 시리즈(엑셀/PDF에서 제목 하이퍼링크용)
     link_series = df["link"] if "link" in df.columns else pd.Series([""] * len(df))
 
-    # ---------------- Excel 다운로드 (URL 컬럼 제외, 제목만 클릭 가능) ----------------
+    # ---------------- Excel 다운로드 (URL 컬럼 제외, 제목만 클릭, 날짜 YYYY-MM-DD) ----------------
     from io import BytesIO
 
-    df_excel = df[display_cols].copy()  # URL 안 넣음
+    df_excel = df_display[display_cols].copy()  # URL 제외, 날짜 이미 YYYY-MM-DD로 정규화
 
     engine = None
     try:
@@ -173,6 +190,7 @@ if run:
             cols = list(df_excel.columns)
             title_idx = cols.index("title") if "title" in cols else None
 
+            # 제목만 클릭 가능 하이퍼링크
             if title_idx is not None:
                 if engine == "xlsxwriter":
                     for r, (title, url) in enumerate(zip(df_excel["title"], link_series), start=1):
@@ -197,7 +215,7 @@ if run:
         )
     # -------------------------------------------------------------------
 
-    # ---------------- PDF 다운로드 (URL 컬럼 제외, 제목만 링크) ---------
+    # ---------------- PDF 다운로드 (URL 제외, 제목만 링크, 날짜 YYYY-MM-DD) ---------
     try:
         from reportlab.lib.pagesizes import A4, landscape
         from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
@@ -241,14 +259,14 @@ if run:
         )
 
         rows = []
-        header = ["제목", "언론사", "발행시각"]  # URL 컬럼 제외
+        header = ["제목", "언론사", "발행시각(YYYY-MM-DD)"]
         rows.append(header)
 
-        for idx, row in df.iterrows():
+        for idx, row in df_display.iterrows():
             title = str(row.get("title", ""))
-            url = str(row.get("link", "")) if pd.notna(row.get("link")) else ""
+            url = str(df.loc[idx].get("link", "")) if "link" in df.columns else ""
             pub = str(row.get("publisher", ""))
-            when = str(row.get("published_at", ""))
+            when = str(row.get("published_at", ""))  # 이미 YYYY-MM-DD
 
             if url.startswith("http"):
                 title_para = Paragraph(f'<link href="{url}">{title}</link>', title_style)
