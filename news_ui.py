@@ -19,6 +19,7 @@ st.set_page_config(page_title="📰 뉴스 키워드 수집/요약 대시보드"
 st.title("📰 뉴스 키워드 수집/요약 대시보드")
 
 # --- 안전한 기본값 (Streamlit rerun 중 일부 위젯 미생성 대비) ---
+filtered = []
 run = False
 use_date_range = False
 start_date = None
