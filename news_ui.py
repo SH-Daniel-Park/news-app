@@ -168,9 +168,9 @@ if run:
         if not u:
             return ""
     # 큰따옴표 이스케이프 (엑셀 수식 안전)
-    u2 = str(u).replace('"', '""')
-    t2 = str(txt).replace('"', '""')
-    return f'=HYPERLINK("{u2}","{t2}")'
+        u2 = str(u).replace('"', '""')
+        t2 = str(txt).replace('"', '""')
+        return f'=HYPERLINK("{u2}","{t2}")'
 
 # 1) 클릭 버튼처럼 보이는 열 (열기)
     df_csv["링크(클릭)"] = df_csv["url"].apply(lambda u: make_hyperlink(u, "열기"))
