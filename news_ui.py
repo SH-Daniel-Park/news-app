@@ -137,13 +137,15 @@ if run:
     st.success(f"총 {len(df)}건의 기사를 확보했습니다.")
     st.dataframe(df[display_cols], use_container_width=True, height=520)
 
-    # ---------------- Excel 다운로드 (TITLE 동일 + https 링크) ----------------
+    # ---------------- Excel 다운로드 (제목만 클릭 가능) ----------------
     from io import BytesIO
 
+    # 엑셀 데이터 준비: URL 컬럼을 명확히 'url'로
     df_excel = df.copy()
     if "link" in df_excel.columns:
         df_excel.rename(columns={"link": "url"}, inplace=True)
 
+    # 엔진 선택
     engine = None
     try:
         import xlsxwriter
@@ -156,22 +158,27 @@ if run:
             engine = None
 
     if engine is None:
-        st.error("xlsxwriter 또는 openpyxl이 필요합니다.")
+        st.error("xlsxwriter 또는 openpyxl이 필요합니다. requirements.txt에 추가 후 배포하세요.")
     else:
         output = BytesIO()
         with pd.ExcelWriter(output, engine=engine) as writer:
+            # 데이터 먼저 기록 (TITLE은 화면과 동일)
             df_excel.to_excel(writer, index=False, sheet_name="results")
             ws = writer.sheets["results"]
+
             cols = list(df_excel.columns)
             title_idx = cols.index("title") if "title" in cols else None
             url_idx   = cols.index("url")   if "url" in cols else None
 
+            # 제목만 클릭 가능하게 (url은 그대로 문자열 보존)
             if url_idx is not None and title_idx is not None:
                 if engine == "xlsxwriter":
+                    # xlsxwriter는 0-based, row 0은 헤더
                     for r, (title, url) in enumerate(zip(df_excel["title"], df_excel["url"]), start=1):
                         if pd.notna(url) and str(url).strip().startswith("http"):
                             ws.write_url(r, title_idx, str(url), string=str(title))
                 else:
+                    # openpyxl은 1-based
                     from openpyxl.styles import Font
                     for r, (title, url) in enumerate(zip(df_excel["title"], df_excel["url"]), start=2):
                         if pd.notna(url) and str(url).strip().startswith("http"):
@@ -188,5 +195,7 @@ if run:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
+    # -------------------------------------------------------------------
+
 else:
     st.info("좌측에서 키워드를 입력 후 수집 시작을 눌러주세요.")
