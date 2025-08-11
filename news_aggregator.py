@@ -20,7 +20,10 @@ from duckduckgo_search import DDGS  # pip install duckduckgo_search
 import requests
 
 # 본문 추출
-from newspaper import Article
+try:
+    from newspaper import Article
+except Exception:
+    Article = None  # graceful fallback
 
 # 요약/키워드
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -207,6 +210,8 @@ def filter_by_domains(items: list[dict], allow_domains: list[str] | None):
 def fetch_full_text(url: str) -> str:
     """일반 웹 페이지 본문 추출 시도"""
     try:
+        if Article is None:
+            return ""
         art = Article(url, language='ko')
         art.download()
         art.parse()
