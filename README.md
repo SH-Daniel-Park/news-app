@@ -1,15 +1,14 @@
-# 🌐 키워드 웹 검색/요약 대시보드 (울트라라이트)
+# 📰 뉴스 키워드 검색기
 
-의존성을 최소화하여 Streamlit Cloud에서 설치 실패를 최대한 피한 버전입니다.
-- 본문 수집/요약/형태소 분석 기능은 기본 비활성화 (필요 시 표준/고정 버전 사용)
-- DuckDuckGo 검색 + 결과 표/CSV + 링크 표시
+이 앱은 키워드를 입력하면 여러 뉴스 소스에서 기사를 모아 보여주고, 본문까지 확인할 수 있는 웹앱입니다.
 
-## 실행
+## 기능
+- NewsAPI, Google News RSS, 한국 주요 언론사 RSS 수집
+- 기사 중복 제거
+- 기사 본문 크롤링 (newspaper3k)
+- CSV 다운로드
+
+## 설치 및 실행
 ```bash
 pip install -r requirements.txt
 streamlit run news_ui.py
-```
-
-## 배포
-- `requirements.txt`와 `news_ui.py`를 레포 **루트**에 두고 배포하세요.
-- 실패 시 Logs에서 첫 오류 줄(패키지명/버전)을 알려주시면 맞춤 조정해 드립니다.
