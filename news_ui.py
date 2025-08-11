@@ -61,6 +61,10 @@ with st.sidebar:
     do_keywords = st.checkbox("키워드(형태소) 추출", True)
 
     st.markdown("---")
+    st.subheader("PDF 한글 폰트(선택) 업로드")
+    pdf_font_file = st.file_uploader("NotoSansKR 등 .ttf/.otf 업로드하면 PDF 한글 표시가 좋습니다.", type=["ttf", "otf"])
+
+    st.markdown("---")
     run = st.button("🔎 수집 시작", use_container_width=True)
 
 # --------------------------- 실행 ---------------------------
@@ -193,6 +197,101 @@ if run:
             data=output.getvalue(),
             file_name=f"{query}_results.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    # -------------------------------------------------------------------
+
+    # ---------------- PDF 다운로드 (제목만 링크, URL 문자열 포함) ---------
+    try:
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
+        from reportlab.lib import colors
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+    except Exception:
+        st.error("PDF 생성을 위해 reportlab 패키지가 필요합니다. requirements.txt에 reportlab을 추가하세요.")
+    else:
+        # 폰트 등록 (업로드 시)
+        base_font_name = "Helvetica"
+        if pdf_font_file is not None:
+            try:
+                font_bytes = pdf_font_file.read()
+                font_name = "UserKoreanFont"
+                import tempfile
+                with tempfile.NamedTemporaryFile(delete=False, suffix="."+pdf_font_file.name.split(".")[-1]) as tf:
+                    tf.write(font_bytes)
+                    tmp_font_path = tf.name
+                pdfmetrics.registerFont(TTFont(font_name, tmp_font_path))
+                base_font_name = font_name
+            except Exception:
+                st.warning("업로드한 폰트를 등록하지 못했습니다. 기본 폰트로 진행합니다. (한글 표시가 깨질 수 있음)")
+
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            name="TitleLink",
+            parent=styles["Normal"],
+            fontName=base_font_name,
+            fontSize=10,
+            textColor=colors.HexColor("#1155cc"),
+            underlineProportion=0.08,
+            leading=14,
+        )
+        cell_style = ParagraphStyle(
+            name="Cell",
+            parent=styles["Normal"],
+            fontName=base_font_name,
+            fontSize=9,
+            leading=12,
+        )
+
+        cols = ["title", "publisher", "published_at", "link"]
+        rows = []
+        header = ["제목", "언론사", "발행시각", "url"]
+        rows.append(header)
+
+        for _, row in df[cols].iterrows():
+            title = str(row.get("title", ""))
+            url = str(row.get("link", "")) if pd.notna(row.get("link")) else ""
+            pub = str(row.get("publisher", ""))
+            when = str(row.get("published_at", ""))
+
+            if url.startswith("http"):
+                title_para = Paragraph(f'<link href="{url}">{title}</link>', title_style)
+            else:
+                title_para = Paragraph(title, cell_style)
+
+            pub_para = Paragraph(pub, cell_style)
+            when_para = Paragraph(when, cell_style)
+            url_para = Paragraph(url, cell_style)
+
+            rows.append([title_para, pub_para, when_para, url_para])
+
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), leftMargin=25, rightMargin=25, topMargin=20, bottomMargin=20)
+        tbl = Table(rows, repeatRows=1, colWidths=[260, 120, 140, 260])
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#f1f3f4")),
+            ("TEXTCOLOR", (0,0), (-1,0), colors.HexColor("#202124")),
+            ("FONTNAME", (0,0), (-1,-1), base_font_name),
+            ("FONTSIZE", (0,0), (-1,0), 10),
+            ("FONTSIZE", (0,1), (-1,-1), 9),
+            ("ALIGN", (2,1), (2,-1), "CENTER"),
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+            ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#fafafa")]),
+            ("GRID", (0,0), (-1,-1), 0.25, colors.HexColor("#dfe1e5")),
+        ]))
+
+        story = [tbl]
+        doc.build(story)
+        pdf_bytes = buffer.getvalue()
+        buffer.close()
+
+        st.download_button(
+            "PDF로 다운로드",
+            data=pdf_bytes,
+            file_name=f"{query}_results.pdf",
+            mime="application/pdf",
             use_container_width=True,
         )
     # -------------------------------------------------------------------
