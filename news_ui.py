@@ -67,20 +67,29 @@ with st.sidebar:
     st.markdown("---")
     run = st.button("🔎 수집 시작", use_container_width=True)
 
-# --------------------------- 실행 ---------------------------
+# --------------------------- 유틸 ---------------------------
 def _to_yyyymmdd(s: str) -> str:
     if not s or pd.isna(s):
         return ""
     try:
         d = pd.to_datetime(s, errors="coerce", utc=True)
         if pd.isna(d):
-            d = pd.to_datetime(s, errors="coerce")  # try naive
+            d = pd.to_datetime(s, errors="coerce")
         if pd.isna(d):
             return ""
         return d.strftime("%Y-%m-%d")
     except Exception:
         return ""
 
+def _truncate_kor(s: str, max_chars: int = 8) -> str:
+    if s is None:
+        return ""
+    s = str(s)
+    if len(s) <= max_chars:
+        return s
+    return s[:max_chars] + "…"
+
+# --------------------------- 실행 ---------------------------
 if run:
     if not query.strip():
         st.warning("키워드를 입력하세요.")
@@ -215,7 +224,7 @@ if run:
         )
     # -------------------------------------------------------------------
 
-    # ---------------- PDF 다운로드 (URL 제외, 제목만 링크, 날짜 YYYY-MM-DD) ---------
+    # ---------------- PDF 다운로드 (URL 제외, 제목만 링크, '발행일' 헤더 + 언론사 8자) ---------
     try:
         from reportlab.lib.pagesizes import A4, landscape
         from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
@@ -259,13 +268,14 @@ if run:
         )
 
         rows = []
-        header = ["제목", "언론사", "발행시각(YYYY-MM-DD)"]
+        header = ["제목", "언론사", "발행일"]  # ← 헤더 텍스트 변경
         rows.append(header)
 
         for idx, row in df_display.iterrows():
             title = str(row.get("title", ""))
             url = str(df.loc[idx].get("link", "")) if "link" in df.columns else ""
-            pub = str(row.get("publisher", ""))
+            pub_full = str(row.get("publisher", ""))
+            pub_trunc = _truncate_kor(pub_full, 8)  # ← 언론사 8글자 제한
             when = str(row.get("published_at", ""))  # 이미 YYYY-MM-DD
 
             if url.startswith("http"):
@@ -273,14 +283,16 @@ if run:
             else:
                 title_para = Paragraph(title, cell_style)
 
-            pub_para = Paragraph(pub, cell_style)
+            pub_para = Paragraph(pub_trunc, cell_style)
             when_para = Paragraph(when, cell_style)
 
             rows.append([title_para, pub_para, when_para])
 
         buffer = io.BytesIO()
+        # 언론사 폭을 더 좁게 조정 (8자 기준 폭): [제목, 언론사, 발행일]
+        col_widths = [340, 90, 150]
         doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), leftMargin=25, rightMargin=25, topMargin=20, bottomMargin=20)
-        tbl = Table(rows, repeatRows=1, colWidths=[320, 160, 160])
+        tbl = Table(rows, repeatRows=1, colWidths=col_widths)
         tbl.setStyle(TableStyle([
             ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#f1f3f4")),
             ("TEXTCOLOR", (0,0), (-1,0), colors.HexColor("#202124")),
