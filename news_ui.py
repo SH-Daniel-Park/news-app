@@ -207,26 +207,49 @@ if run:
     from io import BytesIO
     import pandas as pd
 
-    # 원본 DataFrame에서 링크 클릭 가능한 하이퍼링크 넣기
+    # 엑셀용 DF 준비
     df_excel = df.copy()
     if "link" in df_excel.columns:
         df_excel.rename(columns={"link": "url"}, inplace=True)
 
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        df_excel.to_excel(writer, index=False, sheet_name="news")
-        ws = writer.sheets["news"]
+    # 사용할 엔진 자동 선택
+    engine = None
+    try:
+        import xlsxwriter  # noqa: F401
+        engine = "xlsxwriter"
+    except Exception:
+        try:
+            import openpyxl  # noqa: F401
+            engine = "openpyxl"
+        except Exception:
+            engine = None
 
-    # url 컬럼 인덱스 찾기
-    col_idx = list(df_excel.columns).index("url")
+    if engine is None:
+        st.error("엑셀 작성 엔진(xlsxwriter/openpyxl)이 설치되어 있지 않습니다. requirements.txt에 추가 후 다시 배포하세요.")
+    else:
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine=engine) as writer:
+            df_excel.to_excel(writer, index=False, sheet_name="news")
+            ws = writer.sheets["news"]
 
-    # url 컬럼의 각 셀에 하이퍼링크 설정 (표시 텍스트: "열기")
-    for i, url in enumerate(df_excel["url"], start=2):  # 2행부터 데이터
-        if pd.notna(url) and str(url).strip():
-            ws.write_url(i-1, col_idx, url, string="열기")
+        # url 컬럼 위치
+            if "url" in df_excel.columns:
+                if engine == "xlsxwriter":
+                    col_idx = list(df_excel.columns).index("url")
+                    for i, url in enumerate(df_excel["url"], start=2):  # 2행부터 데이터
+                        if pd.notna(url) and str(url).strip():
+                            ws.write_url(i-1, col_idx, str(url), string="열기")
+                else:  # openpyxl
+                    from openpyxl.styles import Font
+                    col_idx = list(df_excel.columns).index("url") + 1  # openpyxl은 1-based
+                    for i, url in enumerate(df_excel["url"], start=2):
+                        if pd.notna(url) and str(url).strip():
+                            cell = ws.cell(row=i, column=col_idx)
+                            cell.value = "열기"
+                            cell.hyperlink = str(url)
+                            cell.font = Font(color="0000EE", underline="single")  # 하이퍼링크 스타일
 
     output.seek(0)
-
     st.download_button(
         "엑셀(.xlsx)로 다운로드",
         data=output.getvalue(),
@@ -234,6 +257,7 @@ if run:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
+
 
 
 
