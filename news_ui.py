@@ -3,6 +3,7 @@ import io
 import json
 import pandas as pd
 import streamlit as st
+import datetime as dt
 
 from news_aggregator import (
     collect_articles,
@@ -10,6 +11,7 @@ from news_aggregator import (
     filter_by_publishers,
     extract_domain,
     DEFAULT_RSS_FEEDS,
+    filter_by_date_range,
 )
 
 st.set_page_config(page_title="📰 뉴스 키워드 수집/요약 대시보드", layout="wide")
@@ -23,6 +25,15 @@ with st.sidebar:
     query = st.text_input("검색 키워드", placeholder="예) 재정정책, 반도체, 환율 급등")
     max_results = st.slider("최대 기사 수", 10, 300, 60, step=10)
     newsapi_key = st.text_input("NewsAPI 키 (선택)", type="password")
+
+st.markdown("---")
+st.subheader("기간(선택)")
+use_date_range = st.toggle("기간 필터 사용", value=False)
+start_date = end_date = None
+if use_date_range:
+    start_date = st.date_input("시작일", value=dt.date.today())
+    end_date   = st.date_input("종료일", value=dt.date.today())
+
 
     st.markdown("---")
     st.subheader("RSS 소스")
@@ -84,6 +95,23 @@ if run:
         )
 
     filtered = filter_by_publishers(raw, allow_publishers=allow)
+
+# 기간 필터 적용
+def _to_yymmdd(d):
+    return d.strftime("%y%m%d") if d else None
+
+if 'use_date_range' in locals() and use_date_range and (start_date or end_date):
+    if start_date and end_date and end_date < start_date:
+        start_date, end_date = end_date, start_date
+    try:
+        filtered = filter_by_date_range(
+            filtered,
+            _to_yymmdd(start_date),
+            _to_yymmdd(end_date),
+        )
+    except Exception:
+        st.warning("기간 필터 적용 중 문제가 발생하여 기간 필터를 건너뜁니다.")
+
 
     if not filtered:
         st.info("필터 조건에 맞는 기사가 없습니다. 필터를 비우거나 변경해 보세요.")

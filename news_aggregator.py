@@ -98,6 +98,49 @@ def to_iso(ts):
         return ts.astimezone(dt.timezone.utc).isoformat()
     return None
 
+
+
+# --- 날짜 범위 필터링 (yymmdd ~ yymmdd, KST 기준) ------------------------------
+import datetime as dt
+
+def _parse_yymmdd(s: str) -> dt.datetime | None:
+    try:
+        d = dt.datetime.strptime(s.strip(), "%y%m%d")
+        KST = dt.timezone(dt.timedelta(hours=9))
+        return d.replace(tzinfo=KST)
+    except Exception:
+        return None
+
+def filter_by_date_range(items: list[dict], start_yymmdd: str | None, end_yymmdd: str | None):
+    """
+    yymmdd ~ yymmdd 기간(KST)으로 기사 목록 필터
+    - start_yymmdd만 주면 해당 날짜 00:00 이후
+    - end_yymmdd만 주면 해당 날짜 23:59:59까지
+    - 둘 다 없으면 원본 반환
+    """
+    if not start_yymmdd and not end_yymmdd:
+        return items
+
+    KST = dt.timezone(dt.timedelta(hours=9))
+    start_kst = _parse_yymmdd(start_yymmdd) if start_yymmdd else None
+    end_kst = _parse_yymmdd(end_yymmdd) if end_yymmdd else None
+    if end_kst:
+        end_kst = end_kst.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+    out = []
+    for it in items:
+        ts = parse_date(it.get("published_at"))
+        if not ts:
+            continue
+        ts_kst = ts.astimezone(KST) if ts.tzinfo else ts.replace(tzinfo=dt.timezone.utc).astimezone(KST)
+        if start_kst and ts_kst < start_kst:
+            continue
+        if end_kst and ts_kst > end_kst:
+            continue
+        out.append(it)
+    return out
+# -------------------------------------------------------------------------------
+
 def item_hash(title: str, link: str) -> str:
     return hashlib.sha1((title or "" + "|" + normalize_url(link or "")).encode("utf-8")).hexdigest()
 
