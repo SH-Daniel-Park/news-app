@@ -151,9 +151,40 @@ if run:
             st.write(", ".join(kw) if kw else "-")
 
     # CSV 다운로드 ---------------------------------------------------------------
+   
+    # st.markdown("---")
+    # CSV 다운로드 ---------------------------------------------------------------
     st.markdown("---")
     st.subheader("결과 다운로드")
-    csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+
+# CSV 전용 복제본: 링크를 클릭 가능한 HYPERLINK 수식으로 추가
+    df_csv = df.copy()
+
+# 원본 URL 열 보존(엑셀/스프레드시트에서 직접 URL로도 보이게)
+    if "link" in df_csv.columns:
+        df_csv.rename(columns={"link": "url"}, inplace=True)
+
+    def make_hyperlink(u: str, txt: str = "열기") -> str:
+        if not u:
+            return ""
+    # 큰따옴표 이스케이프 (엑셀 수식 안전)
+    u2 = str(u).replace('"', '""')
+    t2 = str(txt).replace('"', '""')
+    return f'=HYPERLINK("{u2}","{t2}")'
+
+# 1) 클릭 버튼처럼 보이는 열 (열기)
+    df_csv["링크(클릭)"] = df_csv["url"].apply(lambda u: make_hyperlink(u, "열기"))
+
+# 2) 제목 자체도 클릭되게 하고 싶다면(선택):
+# if "title" in df_csv.columns:
+#     df_csv["제목(클릭)"] = [
+#         make_hyperlink(u, t) if u else (t or "")
+#         for u, t in zip(df_csv["url"], df_csv["title"])
+#     ]
+
+# CSV 생성 (UTF-8 BOM: 엑셀 한글 깨짐 방지)
+    csv_bytes = df_csv.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+
     st.download_button(
         "CSV로 다운로드",
         data=csv_bytes,
@@ -161,6 +192,52 @@ if run:
         mime="text/csv",
         use_container_width=True,
     )
+
+#    st.subheader("결과 다운로드")
+#    csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+#    st.download_button(
+#        "CSV로 다운로드",
+#        data=csv_bytes,
+#        file_name=f"{query}_news.csv",
+#        mime="text/csv",
+#        use_container_width=True,
+#    )
+
+    # 엑셀 다운로드 ---------------------------------------------------------------
+    from io import BytesIO
+    import pandas as pd
+
+    # 원본 DataFrame에서 링크 클릭 가능한 하이퍼링크 넣기
+    df_excel = df.copy()
+    if "link" in df_excel.columns:
+        df_excel.rename(columns={"link": "url"}, inplace=True)
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        df_excel.to_excel(writer, index=False, sheet_name="news")
+        ws = writer.sheets["news"]
+
+    # url 컬럼 인덱스 찾기
+    col_idx = list(df_excel.columns).index("url")
+
+    # url 컬럼의 각 셀에 하이퍼링크 설정 (표시 텍스트: "열기")
+    for i, url in enumerate(df_excel["url"], start=2):  # 2행부터 데이터
+        if pd.notna(url) and str(url).strip():
+            ws.write_url(i-1, col_idx, url, string="열기")
+
+    output.seek(0)
+
+    st.download_button(
+        "엑셀(.xlsx)로 다운로드",
+        data=output.getvalue(),
+        file_name=f"{query}_news.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+
+
+
+
 
 else:
     st.info("좌측 사이드바에서 키워드를 입력하고 **수집 시작**을 눌러주세요.")
