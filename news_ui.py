@@ -132,7 +132,9 @@ if run:
         enriched = filtered
 
     df = pd.DataFrame(enriched)
-    display_cols = ["title", "publisher", "published_at", "link"]
+
+    # 화면 표시는 URL 제외
+    display_cols = ["title", "publisher", "published_at"]
     if do_summarize:
         display_cols.append("summary")
     if do_keywords:
@@ -141,15 +143,14 @@ if run:
     st.success(f"총 {len(df)}건의 기사를 확보했습니다.")
     st.dataframe(df[display_cols], use_container_width=True, height=520)
 
-    # ---------------- Excel 다운로드 (제목만 클릭 가능) ----------------
+    # 내부 링크 시리즈(엑셀/PDf에서 제목 하이퍼링크 생성용)
+    link_series = df["link"] if "link" in df.columns else pd.Series([""] * len(df))
+
+    # ---------------- Excel 다운로드 (URL 컬럼 제외, 제목만 클릭 가능) ----------------
     from io import BytesIO
 
-    # 엑셀 데이터 준비: URL 컬럼을 명확히 'url'로
-    df_excel = df.copy()
-    if "link" in df_excel.columns:
-        df_excel.rename(columns={"link": "url"}, inplace=True)
+    df_excel = df[display_cols].copy()  # URL 안 넣음
 
-    # 엔진 선택
     engine = None
     try:
         import xlsxwriter
@@ -166,25 +167,20 @@ if run:
     else:
         output = BytesIO()
         with pd.ExcelWriter(output, engine=engine) as writer:
-            # 데이터 먼저 기록 (TITLE은 화면과 동일)
             df_excel.to_excel(writer, index=False, sheet_name="results")
             ws = writer.sheets["results"]
 
             cols = list(df_excel.columns)
             title_idx = cols.index("title") if "title" in cols else None
-            url_idx   = cols.index("url")   if "url" in cols else None
 
-            # 제목만 클릭 가능하게 (url은 그대로 문자열 보존)
-            if url_idx is not None and title_idx is not None:
+            if title_idx is not None:
                 if engine == "xlsxwriter":
-                    # xlsxwriter는 0-based, row 0은 헤더
-                    for r, (title, url) in enumerate(zip(df_excel["title"], df_excel["url"]), start=1):
+                    for r, (title, url) in enumerate(zip(df_excel["title"], link_series), start=1):
                         if pd.notna(url) and str(url).strip().startswith("http"):
                             ws.write_url(r, title_idx, str(url), string=str(title))
                 else:
-                    # openpyxl은 1-based
                     from openpyxl.styles import Font
-                    for r, (title, url) in enumerate(zip(df_excel["title"], df_excel["url"]), start=2):
+                    for r, (title, url) in enumerate(zip(df_excel["title"], link_series), start=2):
                         if pd.notna(url) and str(url).strip().startswith("http"):
                             cell = ws.cell(row=r, column=title_idx + 1)
                             cell.value = str(title)
@@ -201,7 +197,7 @@ if run:
         )
     # -------------------------------------------------------------------
 
-    # ---------------- PDF 다운로드 (제목만 링크, URL 문자열 포함) ---------
+    # ---------------- PDF 다운로드 (URL 컬럼 제외, 제목만 링크) ---------
     try:
         from reportlab.lib.pagesizes import A4, landscape
         from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
@@ -212,7 +208,6 @@ if run:
     except Exception:
         st.error("PDF 생성을 위해 reportlab 패키지가 필요합니다. requirements.txt에 reportlab을 추가하세요.")
     else:
-        # 폰트 등록 (업로드 시)
         base_font_name = "Helvetica"
         if pdf_font_file is not None:
             try:
@@ -245,12 +240,11 @@ if run:
             leading=12,
         )
 
-        cols = ["title", "publisher", "published_at", "link"]
         rows = []
-        header = ["제목", "언론사", "발행시각", "url"]
+        header = ["제목", "언론사", "발행시각"]  # URL 컬럼 제외
         rows.append(header)
 
-        for _, row in df[cols].iterrows():
+        for idx, row in df.iterrows():
             title = str(row.get("title", ""))
             url = str(row.get("link", "")) if pd.notna(row.get("link")) else ""
             pub = str(row.get("publisher", ""))
@@ -263,13 +257,12 @@ if run:
 
             pub_para = Paragraph(pub, cell_style)
             when_para = Paragraph(when, cell_style)
-            url_para = Paragraph(url, cell_style)
 
-            rows.append([title_para, pub_para, when_para, url_para])
+            rows.append([title_para, pub_para, when_para])
 
         buffer = io.BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), leftMargin=25, rightMargin=25, topMargin=20, bottomMargin=20)
-        tbl = Table(rows, repeatRows=1, colWidths=[260, 120, 140, 260])
+        tbl = Table(rows, repeatRows=1, colWidths=[320, 160, 160])
         tbl.setStyle(TableStyle([
             ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#f1f3f4")),
             ("TEXTCOLOR", (0,0), (-1,0), colors.HexColor("#202124")),
