@@ -4,6 +4,7 @@ requests
 python-dateutil
 duckduckgo_search
 feedparser
+beautifulsoup4
 xlsxwriter
 openpyxl
 reportlab
