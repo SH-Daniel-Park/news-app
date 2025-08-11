@@ -3,7 +3,7 @@ pandas
 requests
 python-dateutil
 duckduckgo_search
-# 엑셀/PDF 내보내기
+feedparser
 xlsxwriter
 openpyxl
 reportlab
