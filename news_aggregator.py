@@ -26,7 +26,10 @@ except Exception:
     Article = None  # graceful fallback
 
 # 요약/키워드
-from sklearn.feature_extraction.text import TfidfVectorizer
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+except Exception:
+    TfidfVectorizer = None
 import numpy as np
 
 try:
@@ -231,6 +234,9 @@ def summarize_text(text: str, max_sentences: int = 3) -> str:
     sents = _sent_tokenize_ko(text)
     if not sents:
         return text[:200] + ("..." if len(text) > 200 else "")
+    if TfidfVectorizer is None:
+        # 간단한 대체: 앞에서부터 문장 몇 개 반환
+        return " ".join(sents[:max_sentences])
     vect = TfidfVectorizer(max_features=5000)
     X = vect.fit_transform(sents)
     scores = np.asarray(X.sum(axis=1)).ravel()
