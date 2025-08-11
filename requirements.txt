@@ -1,12 +1,8 @@
+streamlit
+pandas
 requests
-feedparser
 python-dateutil
-trafilatura>=1.6.3
-readability-lxml
-beautifulsoup4
-tldextract
-numpy
+newspaper3k
 scikit-learn
 kiwipiepy
-xlsxwriter
-openpyxl
+duckduckgo_search
