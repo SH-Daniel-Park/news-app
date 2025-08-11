@@ -1,101 +1,303 @@
 # -*- coding: utf-8 -*-
+import io
+import json
 import pandas as pd
 import streamlit as st
 import datetime as dt
 
 from news_aggregator import (
-    search_web,
-    dedupe_and_sort,
-    filter_by_domains,
+    collect_articles,
+    enrich_with_content,
+    filter_by_publishers,
+    extract_domain,
+    DEFAULT_RSS_FEEDS,
+    filter_by_date_range,
 )
 
-st.set_page_config(page_title="🌐 키워드 웹 검색/요약 대시보드 (RL Fix)", layout="wide")
+st.set_page_config(page_title="📰 뉴스 키워드 수집/요약 대시보드", layout="wide")
 
-st.title("🌐 키워드 웹 검색/요약 대시보드 (RL Fix)")
-st.caption("DuckDuckGo 레이트리밋을 지수 백오프로 완화하고, Bing API(선택)를 폴백으로 지원합니다.")
+st.title("📰 뉴스 키워드 수집/요약 대시보드")
 
+# --- 안전한 기본값 (Streamlit rerun 중 일부 위젯 미생성 대비) ---
+filtered = []
+run = False
+use_date_range = False
+start_date = None
+end_date = None
+rss_feeds = []
+st.caption("키워드로 여러 언론 기사를 모아보고, 본문/요약/키워드를 함께 확인하세요.")
+
+# --- 입력 영역 (좌측 사이드바) -------------------------------------------------
 with st.sidebar:
     st.header("검색 설정")
-    query = st.text_input("검색 키워드", placeholder="예) 생성형 AI 보안 가이드, 반도체 시장 전망")
-    max_results = st.slider("최대 결과 수", 10, 100, 40, step=10,
-                            help="레이트리밋 완화를 위해 40~50 이하를 권장")
+    query = st.text_input("검색 키워드", placeholder="예) 재정정책, 반도체, 환율 급등")
+    max_results = st.slider("최대 기사 수", 10, 300, 60, step=10)
+    newsapi_key = st.text_input("NewsAPI 키 (선택)", type="password")
+
+st.markdown("---")
+st.subheader("기간(선택)")
+use_date_range = st.toggle("기간 필터 사용", value=False)
+start_date = end_date = None
+if use_date_range:
+    start_date = st.date_input("시작일", value=dt.date.today())
+    end_date   = st.date_input("종료일", value=dt.date.today())
+
 
     st.markdown("---")
-    st.subheader("기간")
-    col1, col2 = st.columns(2)
-    with col1:
-        date_from = st.date_input("시작일", value=None)
-    with col2:
-        date_to = st.date_input("종료일", value=None)
-
-    st.markdown("---")
-    st.subheader("엔진")
-    engine = st.selectbox("검색 엔진", options=["DuckDuckGo(무료)", "Bing(안정/키필요)"], index=0)
-    bing_api_key = ""
-    if engine.startswith("Bing"):
-        bing_api_key = st.text_input("Bing API 키", type="password",
-                                     help="Azure Bing Web Search API 키 입력 시 보다 안정적으로 작동합니다.")
-
-    st.markdown("---")
-    run = st.button("🔎 웹 검색 시작", use_container_width=True)
-
-# 결과 캐시 (쿼리/기간/엔진별 15분 캐시)
-@st.cache_data(show_spinner=False, ttl=900)
-def _cached_search(query, max_results, date_from, date_to, engine, bing_api_key):
-    eng = "bing" if engine.startswith("Bing") else "duckduckgo"
-    return search_web(
-        query=query,
-        max_results=max_results,
-        date_from=date_from or None,
-        date_to=date_to or None,
-        engine=eng,
-        bing_api_key=bing_api_key or None,
+    st.subheader("RSS 소스")
+    use_default_rss = st.checkbox(
+        "샘플 기본 RSS 사용",
+        True,
+        help="운영 시에는 최신 RSS 주소를 feeds.txt로 관리하는 것을 권장합니다."
     )
+    uploaded_feeds = st.file_uploader("feeds.txt 업로드 (줄당 하나의 RSS URL)", type=["txt"])
 
+    rss_feeds = []
+    if use_default_rss:
+        rss_feeds.extend(DEFAULT_RSS_FEEDS)
+    if uploaded_feeds is not None:
+        try:
+            txt = uploaded_feeds.read().decode("utf-8", errors="ignore")
+            for line in txt.splitlines():
+                url = line.strip()
+                if url and not url.startswith("#"):
+                    rss_feeds.append(url)
+        except Exception:
+            st.warning("feeds.txt를 읽는 중 문제가 발생했습니다.")
+
+    st.markdown("---")
+    st.subheader("콘텐츠 처리")
+    do_fetch_text = st.checkbox("기사 본문 수집 (크롤링)", True)
+    do_summarize = st.checkbox("요약 생성", True)
+    summary_len = st.slider("요약 문장 수", 2, 6, 3)
+    do_keywords = st.checkbox("키워드(형태소) 추출", True)
+
+    st.markdown("---")
+    run = st.button("🔎 수집 시작", use_container_width=True)
+
+# --- 수집 실행 ----------------------------------------------------------------
 if run:
     if not query.strip():
         st.warning("키워드를 입력하세요.")
         st.stop()
 
-    if date_from and date_to and date_from > date_to:
-        st.warning("시작일이 종료일보다 늦습니다.")
-        st.stop()
-
-    with st.spinner("웹을 검색하고 있습니다..."):
-        raw = _cached_search(query, max_results, date_from, date_to, engine, bing_api_key)
+    with st.spinner("기사를 수집하고 있습니다..."):
+        raw = collect_articles(
+            query=query,
+            max_results=max_results,
+            newsapi_key=newsapi_key.strip() or None,
+            rss_feeds=rss_feeds if rss_feeds else None,
+        )
 
     if not raw:
-        st.info("검색 결과가 없습니다. 키워드를 바꾸거나 기간을 넓혀보세요.\n\nBing API 키 사용도 고려해 보세요.")
+        st.info("관련 기사를 찾지 못했습니다. 키워드를 바꿔보거나 결과 수를 늘려보세요.")
         st.stop()
 
-    merged = dedupe_and_sort(raw)
+    # 언론사 필터 UI (수집 결과 기반)
+    publishers = sorted(list({(it.get("publisher") or extract_domain(it["link"]) or "").strip()
+                              for it in raw if it.get("link")}))
+    with st.expander("언론사/도메인 필터"):
+        allow = st.multiselect(
+            "포함할 언론사 또는 도메인 선택 (미선택 시 전체)",
+            options=publishers, default=[]
+        )
 
-    domains = sorted(list({(it.get("domain") or "").strip() for it in merged if it.get("domain")}))
-    with st.expander("도메인 필터"):
-        allow = st.multiselect("포함할 도메인 선택 (미선택 시 전체)", options=domains, default=[])
+    filtered = filter_by_publishers(raw, allow_publishers=allow)
 
-    filtered = filter_by_domains(merged, allow_domains=allow)
+# 기간 필터 적용
+def _to_yymmdd(d):
+    return d.strftime("%y%m%d") if d else None
+
+if 'use_date_range' in locals() and use_date_range and (start_date or end_date):
+    if start_date and end_date and end_date < start_date:
+        start_date, end_date = end_date, start_date
+    try:
+        filtered = filter_by_date_range(
+            filtered,
+            _to_yymmdd(start_date),
+            _to_yymmdd(end_date),
+        )
+    except Exception:
+        st.warning("기간 필터 적용 중 문제가 발생하여 기간 필터를 건너뜁니다.")
+
+
     if not filtered:
-        st.info("필터 조건에 맞는 결과가 없습니다.")
+        st.info("필터 조건에 맞는 기사가 없습니다. 필터를 비우거나 변경해 보세요.")
         st.stop()
 
-    df = pd.DataFrame(filtered)
-    display_cols = ["title", "domain", "published_at", "link"]
+    # 본문/요약/키워드 추가
+    if do_fetch_text or do_summarize or do_keywords:
+        with st.spinner("본문/요약/키워드를 생성 중입니다..."):
+            enriched = enrich_with_content(
+                filtered,
+                do_fetch_text=do_fetch_text,
+                do_summarize=do_summarize,
+                do_keywords=do_keywords,
+                summary_sentences=summary_len,
+            )
+    else:
+        enriched = filtered
 
-    st.success(f"총 {len(df)}건의 결과를 확보했습니다.")
+    # 표로 표시 -----------------------------------------------------------------
+    df = pd.DataFrame(enriched)
 
-    # URL은 'https://...' 문자열로 그대로 표시
-    df_display = df[display_cols].copy()
-    if "link" in df_display.columns:
-        df_display["link"] = df_display["link"].astype(str)
-    st.dataframe(df_display, use_container_width=True, height=520)
+    # 표시용 열 정리
+    display_cols = ["title", "publisher", "published_at", "link"]
+    if do_summarize:
+        display_cols.append("summary")
+    if do_keywords:
+        display_cols.append("keywords")
 
+    st.success(f"총 {len(df)}건의 기사를 확보했습니다.")
+
+    # 🔗 링크를 클릭 가능하게: LinkColumn 사용 (한 번 클릭으로 새 탭 이동)
+    st.dataframe(
+        df[display_cols],
+        use_container_width=True,
+        height=520,
+        column_config={
+            "link": st.column_config.LinkColumn(
+                "링크",
+                display_text="바로가기"
+            ),
+            "title": st.column_config.TextColumn("제목", width="large"),
+            "publisher": st.column_config.TextColumn("언론사"),
+            "published_at": st.column_config.TextColumn("발행시각"),
+            # summary/keywords는 자동 렌더링
+        }
+    )
+
+    # 상세 보기 -----------------------------------------------------------------
+    st.markdown("### 세부 기사 보기")
+    titles = ["(선택)"] + df["title"].tolist()
+    sel = st.selectbox("본문/요약/키워드를 확인할 기사", options=titles, index=0)
+    if sel != "(선택)":
+        row = df[df["title"] == sel].iloc[0]
+        st.markdown(f"**언론사**: {row.get('publisher','')}  |  **발행**: {row.get('published_at','')}")
+        st.markdown(f"**원문 링크**: {row.get('link','')}")
+        if do_fetch_text:
+            st.markdown("#### 본문")
+            st.write(row.get("content", "") or "본문을 수집하지 못했습니다.")
+        if do_summarize:
+            st.markdown("#### 요약")
+            st.write(row.get("summary", "") or "-")
+        if do_keywords:
+            st.markdown("#### 키워드")
+            kw = row.get("keywords", []) or []
+            st.write(", ".join(kw) if kw else "-")
+
+    # CSV 다운로드 ---------------------------------------------------------------
+   
+    # st.markdown("---")
+    # CSV 다운로드 ---------------------------------------------------------------
     st.markdown("---")
     st.subheader("결과 다운로드")
-    csv_bytes = df_display.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
-    st.download_button("CSV로 다운로드", data=csv_bytes, file_name=f"{query}_web.csv",
-                       mime="text/csv", use_container_width=True)
+
+# CSV 전용 복제본: 링크를 클릭 가능한 HYPERLINK 수식으로 추가
+    df_csv = df.copy()
+
+# 원본 URL 열 보존(엑셀/스프레드시트에서 직접 URL로도 보이게)
+    if "link" in df_csv.columns:
+        df_csv.rename(columns={"link": "url"}, inplace=True)
+
+    def make_hyperlink(u: str, txt: str = "열기") -> str:
+        if not u:
+            return ""
+    # 큰따옴표 이스케이프 (엑셀 수식 안전)
+        u2 = str(u).replace('"', '""')
+        t2 = str(txt).replace('"', '""')
+        return f'=HYPERLINK("{u2}","{t2}")'
+
+# 1) 클릭 버튼처럼 보이는 열 (열기)
+    df_csv["링크(클릭)"] = df_csv["url"].apply(lambda u: make_hyperlink(u, "열기"))
+
+# 2) 제목 자체도 클릭되게 하고 싶다면(선택):
+# if "title" in df_csv.columns:
+#     df_csv["제목(클릭)"] = [
+#         make_hyperlink(u, t) if u else (t or "")
+#         for u, t in zip(df_csv["url"], df_csv["title"])
+#     ]
+
+# CSV 생성 (UTF-8 BOM: 엑셀 한글 깨짐 방지)
+    csv_bytes = df_csv.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+
+    st.download_button(
+        "CSV로 다운로드",
+        data=csv_bytes,
+        file_name=f"{query}_news.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+#    st.subheader("결과 다운로드")
+#    csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+#    st.download_button(
+#        "CSV로 다운로드",
+#        data=csv_bytes,
+#        file_name=f"{query}_news.csv",
+#        mime="text/csv",
+#        use_container_width=True,
+#    )
+
+    # 엑셀 다운로드 ---------------------------------------------------------------
+    from io import BytesIO
+    import pandas as pd
+
+    # 엑셀용 DF 준비
+    df_excel = df.copy()
+    if "link" in df_excel.columns:
+        df_excel.rename(columns={"link": "url"}, inplace=True)
+
+    # 사용할 엔진 자동 선택
+    engine = None
+    try:
+        import xlsxwriter  # noqa: F401
+        engine = "xlsxwriter"
+    except Exception:
+        try:
+            import openpyxl  # noqa: F401
+            engine = "openpyxl"
+        except Exception:
+            engine = None
+
+    if engine is None:
+        st.error("엑셀 작성 엔진(xlsxwriter/openpyxl)이 설치되어 있지 않습니다. requirements.txt에 추가 후 다시 배포하세요.")
+    else:
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine=engine) as writer:
+            df_excel.to_excel(writer, index=False, sheet_name="news")
+            ws = writer.sheets["news"]
+
+        # url 컬럼 위치
+            if "url" in df_excel.columns:
+                if engine == "xlsxwriter":
+                    col_idx = list(df_excel.columns).index("url")
+                    for i, url in enumerate(df_excel["url"], start=2):  # 2행부터 데이터
+                        if pd.notna(url) and str(url).strip():
+                            ws.write_url(i-1, col_idx, str(url), string="열기")
+                else:  # openpyxl
+                    from openpyxl.styles import Font
+                    col_idx = list(df_excel.columns).index("url") + 1  # openpyxl은 1-based
+                    for i, url in enumerate(df_excel["url"], start=2):
+                        if pd.notna(url) and str(url).strip():
+                            cell = ws.cell(row=i, column=col_idx)
+                            cell.value = "열기"
+                            cell.hyperlink = str(url)
+                            cell.font = Font(color="0000EE", underline="single")  # 하이퍼링크 스타일
+
+    output.seek(0)
+    st.download_button(
+        "엑셀(.xlsx)로 다운로드",
+        data=output.getvalue(),
+        file_name=f"{query}_news.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+
+
+
+
+
 
 else:
-    st.info("좌측 사이드바에서 키워드/기간을 설정하고 **웹 검색 시작**을 눌러주세요.\n\n"
-            "레이트리밋이 잦다면 결과 수를 줄이거나, Bing API 키를 사용해 보세요.")
+    st.info("좌측 사이드바에서 키워드를 입력하고 **수집 시작**을 눌러주세요.")

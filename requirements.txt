@@ -1,0 +1,12 @@
+requests
+feedparser
+python-dateutil
+trafilatura>=1.6.3
+readability-lxml
+beautifulsoup4
+tldextract
+numpy
+scikit-learn
+kiwipiepy
+xlsxwriter
+openpyxl
