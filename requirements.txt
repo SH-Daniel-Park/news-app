@@ -5,6 +5,7 @@ python-dateutil
 duckduckgo_search
 feedparser
 beautifulsoup4
+scikit-learn
 xlsxwriter
 openpyxl
 reportlab
