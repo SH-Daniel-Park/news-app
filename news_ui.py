@@ -11,46 +11,34 @@ from news_aggregator import (
     filter_by_publishers,
     extract_domain,
     DEFAULT_RSS_FEEDS,
-    filter_by_date_range,
 )
 
 st.set_page_config(page_title="📰 뉴스 키워드 수집/요약 대시보드", layout="wide")
-
 st.title("📰 뉴스 키워드 수집/요약 대시보드")
-
-# --- 안전한 기본값 (Streamlit rerun 중 일부 위젯 미생성 대비) ---
-filtered = []
-run = False
-use_date_range = False
-start_date = None
-end_date = None
-rss_feeds = []
 st.caption("키워드로 여러 언론 기사를 모아보고, 본문/요약/키워드를 함께 확인하세요.")
 
-# --- 입력 영역 (좌측 사이드바) -------------------------------------------------
+# --------------------------- 사이드바 ---------------------------
 with st.sidebar:
     st.header("검색 설정")
     query = st.text_input("검색 키워드", placeholder="예) 재정정책, 반도체, 환율 급등")
     max_results = st.slider("최대 기사 수", 10, 300, 60, step=10)
     newsapi_key = st.text_input("NewsAPI 키 (선택)", type="password")
 
-st.markdown("---")
-st.subheader("기간(선택)")
-use_date_range = st.toggle("기간 필터 사용", value=False)
-start_date = end_date = None
-if use_date_range:
-    start_date = st.date_input("시작일", value=dt.date.today())
-    end_date   = st.date_input("종료일", value=dt.date.today())
-
+    st.markdown("---")
+    st.subheader("기간(선택)")
+    use_date_range = st.toggle("기간 필터 사용", value=False)
+    start_date = end_date = None
+    if use_date_range:
+        col1, col2 = st.columns(2)
+        with col1:
+            start_date = st.date_input("시작일", value=dt.date.today())
+        with col2:
+            end_date = st.date_input("종료일", value=dt.date.today())
 
     st.markdown("---")
     st.subheader("RSS 소스")
-    use_default_rss = st.checkbox(
-        "샘플 기본 RSS 사용",
-        True,
-        help="운영 시에는 최신 RSS 주소를 feeds.txt로 관리하는 것을 권장합니다."
-    )
-    uploaded_feeds = st.file_uploader("feeds.txt 업로드 (줄당 하나의 RSS URL)", type=["txt"])
+    use_default_rss = st.checkbox("샘플 기본 RSS 사용", True)
+    uploaded_feeds = st.file_uploader("feeds.txt 업로드", type=["txt"])
 
     rss_feeds = []
     if use_default_rss:
@@ -75,7 +63,7 @@ if use_date_range:
     st.markdown("---")
     run = st.button("🔎 수집 시작", use_container_width=True)
 
-# --- 수집 실행 ----------------------------------------------------------------
+# --------------------------- 실행 ---------------------------
 if run:
     if not query.strip():
         st.warning("키워드를 입력하세요.")
@@ -90,42 +78,43 @@ if run:
         )
 
     if not raw:
-        st.info("관련 기사를 찾지 못했습니다. 키워드를 바꿔보거나 결과 수를 늘려보세요.")
+        st.info("관련 기사를 찾지 못했습니다.")
         st.stop()
 
-    # 언론사 필터 UI (수집 결과 기반)
-    publishers = sorted(list({(it.get("publisher") or extract_domain(it["link"]) or "").strip()
+    publishers = sorted(list({(it.get("publisher") or extract_domain(it.get("link","")) or "").strip()
                               for it in raw if it.get("link")}))
     with st.expander("언론사/도메인 필터"):
-        allow = st.multiselect(
-            "포함할 언론사 또는 도메인 선택 (미선택 시 전체)",
-            options=publishers, default=[]
-        )
+        allow = st.multiselect("포함할 언론사/도메인", options=publishers, default=[])
 
     filtered = filter_by_publishers(raw, allow_publishers=allow)
 
-# 기간 필터 적용
-def _to_yymmdd(d):
-    return d.strftime("%y%m%d") if d else None
+    # 기간 필터
+    def parse_date_iso(s):
+        try:
+            return pd.to_datetime(s, utc=True).date()
+        except Exception:
+            return None
 
-if 'use_date_range' in locals() and use_date_range and (start_date or end_date):
-    if start_date and end_date and end_date < start_date:
-        start_date, end_date = end_date, start_date
-    try:
-        filtered = filter_by_date_range(
-            filtered,
-            _to_yymmdd(start_date),
-            _to_yymmdd(end_date),
-        )
-    except Exception:
-        st.warning("기간 필터 적용 중 문제가 발생하여 기간 필터를 건너뜁니다.")
-
+    if use_date_range and (start_date or end_date):
+        if start_date and end_date and end_date < start_date:
+            start_date, end_date = end_date, start_date
+        tmp = []
+        for it in filtered:
+            d = parse_date_iso(it.get("published_at"))
+            ok = True
+            if start_date and d and d < start_date:
+                ok = False
+            if end_date and d and d > end_date:
+                ok = False
+            if ok:
+                tmp.append(it)
+        filtered = tmp
 
     if not filtered:
-        st.info("필터 조건에 맞는 기사가 없습니다. 필터를 비우거나 변경해 보세요.")
+        st.info("필터 조건에 맞는 기사가 없습니다.")
         st.stop()
 
-    # 본문/요약/키워드 추가
+    # 본문/요약/키워드
     if do_fetch_text or do_summarize or do_keywords:
         with st.spinner("본문/요약/키워드를 생성 중입니다..."):
             enriched = enrich_with_content(
@@ -138,10 +127,7 @@ if 'use_date_range' in locals() and use_date_range and (start_date or end_date):
     else:
         enriched = filtered
 
-    # 표로 표시 -----------------------------------------------------------------
     df = pd.DataFrame(enriched)
-
-    # 표시용 열 정리
     display_cols = ["title", "publisher", "published_at", "link"]
     if do_summarize:
         display_cols.append("summary")
@@ -149,155 +135,58 @@ if 'use_date_range' in locals() and use_date_range and (start_date or end_date):
         display_cols.append("keywords")
 
     st.success(f"총 {len(df)}건의 기사를 확보했습니다.")
+    st.dataframe(df[display_cols], use_container_width=True, height=520)
 
-    # 🔗 링크를 클릭 가능하게: LinkColumn 사용 (한 번 클릭으로 새 탭 이동)
-    st.dataframe(
-        df[display_cols],
-        use_container_width=True,
-        height=520,
-        column_config={
-            "link": st.column_config.LinkColumn(
-                "링크",
-                display_text="바로가기"
-            ),
-            "title": st.column_config.TextColumn("제목", width="large"),
-            "publisher": st.column_config.TextColumn("언론사"),
-            "published_at": st.column_config.TextColumn("발행시각"),
-            # summary/keywords는 자동 렌더링
-        }
-    )
-
-    # 상세 보기 -----------------------------------------------------------------
-    st.markdown("### 세부 기사 보기")
-    titles = ["(선택)"] + df["title"].tolist()
-    sel = st.selectbox("본문/요약/키워드를 확인할 기사", options=titles, index=0)
-    if sel != "(선택)":
-        row = df[df["title"] == sel].iloc[0]
-        st.markdown(f"**언론사**: {row.get('publisher','')}  |  **발행**: {row.get('published_at','')}")
-        st.markdown(f"**원문 링크**: {row.get('link','')}")
-        if do_fetch_text:
-            st.markdown("#### 본문")
-            st.write(row.get("content", "") or "본문을 수집하지 못했습니다.")
-        if do_summarize:
-            st.markdown("#### 요약")
-            st.write(row.get("summary", "") or "-")
-        if do_keywords:
-            st.markdown("#### 키워드")
-            kw = row.get("keywords", []) or []
-            st.write(", ".join(kw) if kw else "-")
-
-    # CSV 다운로드 ---------------------------------------------------------------
-   
-    # st.markdown("---")
-    # CSV 다운로드 ---------------------------------------------------------------
-    st.markdown("---")
-    st.subheader("결과 다운로드")
-
-# CSV 전용 복제본: 링크를 클릭 가능한 HYPERLINK 수식으로 추가
-    df_csv = df.copy()
-
-# 원본 URL 열 보존(엑셀/스프레드시트에서 직접 URL로도 보이게)
-    if "link" in df_csv.columns:
-        df_csv.rename(columns={"link": "url"}, inplace=True)
-
-    def make_hyperlink(u: str, txt: str = "열기") -> str:
-        if not u:
-            return ""
-    # 큰따옴표 이스케이프 (엑셀 수식 안전)
-        u2 = str(u).replace('"', '""')
-        t2 = str(txt).replace('"', '""')
-        return f'=HYPERLINK("{u2}","{t2}")'
-
-# 1) 클릭 버튼처럼 보이는 열 (열기)
-    df_csv["링크(클릭)"] = df_csv["url"].apply(lambda u: make_hyperlink(u, "열기"))
-
-# 2) 제목 자체도 클릭되게 하고 싶다면(선택):
-# if "title" in df_csv.columns:
-#     df_csv["제목(클릭)"] = [
-#         make_hyperlink(u, t) if u else (t or "")
-#         for u, t in zip(df_csv["url"], df_csv["title"])
-#     ]
-
-# CSV 생성 (UTF-8 BOM: 엑셀 한글 깨짐 방지)
-    csv_bytes = df_csv.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
-
-    st.download_button(
-        "CSV로 다운로드",
-        data=csv_bytes,
-        file_name=f"{query}_news.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-
-#    st.subheader("결과 다운로드")
-#    csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
-#    st.download_button(
-#        "CSV로 다운로드",
-#        data=csv_bytes,
-#        file_name=f"{query}_news.csv",
-#        mime="text/csv",
-#        use_container_width=True,
-#    )
-
-    # 엑셀 다운로드 ---------------------------------------------------------------
+    # ---------------- Excel 다운로드 (TITLE 동일 + https 링크) ----------------
     from io import BytesIO
-    import pandas as pd
 
-    # 엑셀용 DF 준비
     df_excel = df.copy()
     if "link" in df_excel.columns:
         df_excel.rename(columns={"link": "url"}, inplace=True)
 
-    # 사용할 엔진 자동 선택
     engine = None
     try:
-        import xlsxwriter  # noqa: F401
+        import xlsxwriter
         engine = "xlsxwriter"
     except Exception:
         try:
-            import openpyxl  # noqa: F401
+            import openpyxl
             engine = "openpyxl"
         except Exception:
             engine = None
 
     if engine is None:
-        st.error("엑셀 작성 엔진(xlsxwriter/openpyxl)이 설치되어 있지 않습니다. requirements.txt에 추가 후 다시 배포하세요.")
+        st.error("xlsxwriter 또는 openpyxl이 필요합니다.")
     else:
         output = BytesIO()
         with pd.ExcelWriter(output, engine=engine) as writer:
-            df_excel.to_excel(writer, index=False, sheet_name="news")
-            ws = writer.sheets["news"]
+            df_excel.to_excel(writer, index=False, sheet_name="results")
+            ws = writer.sheets["results"]
+            cols = list(df_excel.columns)
+            title_idx = cols.index("title") if "title" in cols else None
+            url_idx   = cols.index("url")   if "url" in cols else None
 
-        # url 컬럼 위치
-            if "url" in df_excel.columns:
+            if url_idx is not None and title_idx is not None:
                 if engine == "xlsxwriter":
-                    col_idx = list(df_excel.columns).index("url")
-                    for i, url in enumerate(df_excel["url"], start=2):  # 2행부터 데이터
-                        if pd.notna(url) and str(url).strip():
-                            ws.write_url(i-1, col_idx, str(url), string="열기")
-                else:  # openpyxl
+                    for r, (title, url) in enumerate(zip(df_excel["title"], df_excel["url"]), start=1):
+                        if pd.notna(url) and str(url).strip().startswith("http"):
+                            ws.write_url(r, title_idx, str(url), string=str(title))
+                else:
                     from openpyxl.styles import Font
-                    col_idx = list(df_excel.columns).index("url") + 1  # openpyxl은 1-based
-                    for i, url in enumerate(df_excel["url"], start=2):
-                        if pd.notna(url) and str(url).strip():
-                            cell = ws.cell(row=i, column=col_idx)
-                            cell.value = "열기"
+                    for r, (title, url) in enumerate(zip(df_excel["title"], df_excel["url"]), start=2):
+                        if pd.notna(url) and str(url).strip().startswith("http"):
+                            cell = ws.cell(row=r, column=title_idx + 1)
+                            cell.value = str(title)
                             cell.hyperlink = str(url)
-                            cell.font = Font(color="0000EE", underline="single")  # 하이퍼링크 스타일
+                            cell.font = Font(color="0000EE", underline="single")
 
-    output.seek(0)
-    st.download_button(
-        "엑셀(.xlsx)로 다운로드",
-        data=output.getvalue(),
-        file_name=f"{query}_news.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
-
-
-
-
-
-
+        output.seek(0)
+        st.download_button(
+            "엑셀(.xlsx)로 다운로드",
+            data=output.getvalue(),
+            file_name=f"{query}_results.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
 else:
-    st.info("좌측 사이드바에서 키워드를 입력하고 **수집 시작**을 눌러주세요.")
+    st.info("좌측에서 키워드를 입력 후 수집 시작을 눌러주세요.")
