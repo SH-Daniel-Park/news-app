@@ -249,7 +249,7 @@ if run:
                             cell.hyperlink = str(url)
                             cell.font = Font(color="0000EE", underline="single")  # 하이퍼링크 스타일
 
-    `output.seek(0)
+    output.seek(0)
     st.download_button(
         "엑셀(.xlsx)로 다운로드",
         data=output.getvalue(),
