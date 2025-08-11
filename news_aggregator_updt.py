@@ -22,8 +22,6 @@ import feedparser
 from dateutil import parser as dtparser
 
 # 본문 추출
-# from newspaper import Article
-# 
 # 본문 추출: trafilatura 우선, 실패 시 간단 백업 절차
 try:
     import trafilatura
@@ -36,9 +34,6 @@ try:
     from readability import Document  # 백업용
 except Exception:
     Document = None
-
-
-
 # 요약/키워드
 from sklearn.feature_extraction.text import TfidfVectorizer
 import numpy as np
@@ -102,6 +97,93 @@ def item_hash(title: str, link: str) -> str:
     return hashlib.sha1((title or "" + "|" + normalize_url(link or "")).encode("utf-8")).hexdigest()
 
 # --- 수집기들 -----------------------------------------------------------------
+
+def search_web_duckduckgo(query: str, max_results: int = 30):
+    """무료/무키 기반의 DuckDuckGo HTML 결과 파싱 (간이)"""
+    url = "https://html.duckduckgo.com/html/"
+    try:
+        r = requests.post(
+            url,
+            data={"q": query},
+            headers={"User-Agent": USER_AGENT},
+            timeout=REQUEST_TIMEOUT,
+        )
+        r.raise_for_status()
+    except Exception:
+        return []
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    items = []
+    for res in soup.select("div.result"):
+        a = res.select_one("a.result__a") or res.select_one("a[href]")
+        if not a:
+            continue
+        link = normalize_url(a.get("href") or "")
+        title = html.unescape(a.get_text(strip=True))
+        if not link or not title:
+            continue
+        publisher = extract_domain(link)
+        items.append({
+            "id": item_hash(title, link),
+            "title": title,
+            "link": link,
+            "publisher": publisher,
+            "published_at": None,
+            "source": "web",
+        })
+        if len(items) >= max_results:
+            break
+    return items
+
+
+def search_web_google_cse(query: str, cse_id: str, api_key: str, max_results: int = 30):
+    """Google Programmable Search (CSE)"""
+    items = []
+    start = 1
+    while len(items) < max_results:
+        num = min(10, max_results - len(items))
+        params = {
+            "q": query,
+            "cx": cse_id,
+            "key": api_key,
+            "num": num,
+            "start": start,
+        }
+        try:
+            r = requests.get("https://www.googleapis.com/customsearch/v1", params=params, timeout=REQUEST_TIMEOUT)
+            r.raise_for_status()
+            data = r.json()
+        except Exception:
+            break
+
+        for it in data.get("items", []) or []:
+            title = html.unescape(it.get("title") or "")
+            link = normalize_url(it.get("link") or "")
+            if not link or not title:
+                continue
+            publisher = extract_domain(link)
+            items.append({
+                "id": item_hash(title, link),
+                "title": title,
+                "link": link,
+                "publisher": publisher,
+                "published_at": None,
+                "source": "web",
+            })
+            if len(items) >= max_results:
+                break
+        start += num
+        if not data.get("items"):
+            break
+    return items
+
+
+def search_web(query: str, max_results: int = 30,
+               google_cse_id: str | None = None, google_api_key: str | None = None):
+    """일반 웹 문서 검색: Google CSE 우선, 없으면 DuckDuckGo HTML"""
+    if google_cse_id and google_api_key:
+        return search_web_google_cse(query, google_cse_id, google_api_key, max_results=max_results)
+    return search_web_duckduckgo(query, max_results=max_results)
 
 def search_google_news_rss(query: str, max_results: int = 50, lang="ko", region="KR"):
     """
@@ -225,83 +307,26 @@ def dedupe_and_merge(list_of_lists: list[list[dict]]):
     return arr
 
 # --- 본문/요약/키워드 ----------------------------------------------------------
+
 def fetch_full_text(url: str) -> str:
     """
-    기사 본문 텍스트 크롤링
-    - 1순위: trafilatura (안정/정확)
-    - 백업: requests + readability-lxml + BeautifulSoup
+    기사 본문 텍스트 크롤링 (newspaper3k)
     """
-    # 1) trafilatura 시도
-    if _has_trafilatura:
-        try:
-            downloaded = trafilatura.fetch_url(url, no_ssl=True, user_agent=USER_AGENT, timeout=REQUEST_TIMEOUT)
-            if downloaded:
-                text = trafilatura.extract(
-                    downloaded,
-                    include_comments=False,
-                    include_tables=False,
-                    favor_recall=False,
-                    url=url,
-                )
-                if text and text.strip():
-                    return text.strip()
-        except Exception:
-            pass
-
-    # 2) 백업: requests + readability + BS4
     try:
-        r = _http_get(url)
-        r.raise_for_status()
-        html_txt = r.text
-        if Document is not None:
-            try:
-                doc = Document(html_txt)
-                content_html = doc.summary()
-                soup = BeautifulSoup(content_html, "html.parser")
-                text = soup.get_text("\n", strip=True)
-                if text and len(text) > 120:  # 너무 짧으면 실패로 간주
-                    return text
-            except Exception:
-                pass
-
-        # 최후: 전체 HTML에서 텍스트만 추출
-        soup = BeautifulSoup(html_txt, "html.parser")
-        text = soup.get_text("\n", strip=True)
-        return text[:5000]  # 너무 길어지는 것 방지
+        art = Article(url, language='ko')
+        art.download()
+        art.parse()
+        text = (art.text or "").strip()
+        return text
     except Exception:
         return ""
-
-#def fetch_full_text(url: str) -> str:
-#    """
-#    기사 본문 텍스트 크롤링 (newspaper3k)
-#    """
-#    try:
-#        art = Article(url, language='ko')
-#        art.download()
-#        art.parse()
-#        text = (art.text or "").strip()
-#        return text
-#    except Exception:
-#        return ""
-
-#def _sent_tokenize_ko(text: str) -> list[str]:
-    # 매우 단순한 한국어 문장분리 (정확도보다 경량 선호)
-#    text = re.sub(r"\s+", " ", text).strip()
-#    sents = re.split(r"(?<=[\.!?]|다\.)\s+", text)
-    # 너무 짧은 문장 제거
-#    return [s.strip() for s in sents if len(s.strip()) >= 10]
 
 def _sent_tokenize_ko(text: str) -> list[str]:
     # 매우 단순한 한국어 문장분리 (정확도보다 경량 선호)
     text = re.sub(r"\s+", " ", text).strip()
-    MARK = "§¶§"  # 거의 안 나올 구분자
-    # 문장 끝 패턴 뒤에 구분자 삽입
-    text = re.sub(r"(다\.|[.!?])\s+", r"\1" + MARK, text)
-    sents = [s.strip() for s in text.split(MARK)]
+    sents = re.split(r"(?<=[\.!?]|다\.)\s+", text)
     # 너무 짧은 문장 제거
-    return [s for s in sents if len(s) >= 10]
-
-
+    return [s.strip() for s in sents if len(s.strip()) >= 10]
 
 def summarize_text(text: str, max_sentences: int = 3) -> str:
     if not text:
@@ -354,19 +379,28 @@ def collect_articles(
     max_results: int = 50,
     newsapi_key: str | None = None,
     rss_feeds: list[str] | None = None,
+    include_web: bool = False,
+    google_cse_id: str | None = None,
+    google_api_key: str | None = None,
 ):
-    """
-    수집 파이프라인: GoogleNewsRSS → NewsAPI(선택) → 사용자 RSS(선택)
-    """
+    """수집 파이프라인: (선택) 웹 → GoogleNewsRSS → NewsAPI → 사용자 RSS"""
     results = []
     remain = max_results
 
-    # Google News RSS
-    g = search_google_news_rss(query, max_results=remain)
-    results.append(g)
-    remain = max(0, remain - len(g))
+    if include_web and remain > 0:
+        try:
+            w = search_web(query, max_results=remain,
+                           google_cse_id=google_cse_id, google_api_key=google_api_key)
+            results.append(w)
+            remain = max(0, remain - len(w))
+        except Exception:
+            pass
 
-    # NewsAPI (선택)
+    if remain > 0:
+        g = search_google_news_rss(query, max_results=remain)
+        results.append(g)
+        remain = max(0, remain - len(g))
+
     if remain > 0 and newsapi_key:
         try:
             n = search_newsapi(query, newsapi_key, max_results=remain)
@@ -375,13 +409,13 @@ def collect_articles(
         except Exception:
             pass
 
-    # 사용자 RSS (선택)
     if remain > 0 and rss_feeds:
         r = fetch_from_rss_feeds(query, rss_feeds, max_per_feed=20)
         results.append(r)
 
     merged = dedupe_and_merge(results)
     return merged
+
 
 def enrich_with_content(items: list[dict], do_fetch_text=True, do_summarize=True, do_keywords=True,
                         summary_sentences=3):
