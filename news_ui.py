@@ -89,6 +89,14 @@ def _truncate_kor(s: str, max_chars: int = 8) -> str:
         return s
     return s[:max_chars] + "…"
 
+def _make_title_text(query, start_date, end_date, use_date_range=False):
+    parts = [f"키워드: {query.strip()}"]
+    if use_date_range and (start_date or end_date):
+        s = start_date.strftime("%Y-%m-%d") if start_date else ""
+        e = end_date.strftime("%Y-%m-%d") if end_date else ""
+        parts.append(f"기간: {s} ~ {e}")
+    return " / ".join([p for p in parts if p])
+
 # --------------------------- 실행 ---------------------------
 if run:
     if not query.strip():
@@ -172,7 +180,10 @@ if run:
     # 내부 링크 시리즈(엑셀/PDF에서 제목 하이퍼링크용)
     link_series = df["link"] if "link" in df.columns else pd.Series([""] * len(df))
 
-    # ---------------- Excel 다운로드 (URL 컬럼 제외, 제목만 클릭, 날짜 YYYY-MM-DD) ----------------
+    # 공통 타이틀 텍스트
+    title_text = _make_title_text(query, start_date, end_date, use_date_range)
+
+    # ---------------- Excel 다운로드 (첫 행 제목 + URL 제외 + 제목만 클릭 + 날짜 YYYY-MM-DD) ----------------
     from io import BytesIO
 
     df_excel = df_display[display_cols].copy()  # URL 제외, 날짜 이미 YYYY-MM-DD로 정규화
@@ -192,29 +203,54 @@ if run:
         st.error("xlsxwriter 또는 openpyxl이 필요합니다. requirements.txt에 추가 후 배포하세요.")
     else:
         output = BytesIO()
-        with pd.ExcelWriter(output, engine=engine) as writer:
-            df_excel.to_excel(writer, index=False, sheet_name="results")
-            ws = writer.sheets["results"]
+        if engine == "xlsxwriter":
+            with pd.ExcelWriter(output, engine=engine) as writer:
+                # 데이터는 2행부터 쓰기 (0-based로 startrow=1) → 1행(A1)은 타이틀
+                df_excel.to_excel(writer, index=False, sheet_name="results", startrow=1)
+                ws = writer.sheets["results"]
+                cols = list(df_excel.columns)
+                title_idx = cols.index("title") if "title" in cols else None
 
-            cols = list(df_excel.columns)
-            title_idx = cols.index("title") if "title" in cols else None
+                # A1 ~ 마지막 컬럼 헤더까지 병합하여 타이틀 배치
+                last_col_letter = chr(ord('A') + len(cols) - 1)
+                title_format = writer.book.add_format({
+                    "bold": True, "font_size": 12, "align": "left", "valign": "vcenter"
+                })
+                ws.merge_range(f"A1:{last_col_letter}1", title_text, title_format)
 
-            # 제목만 클릭 가능 하이퍼링크
-            if title_idx is not None:
-                if engine == "xlsxwriter":
-                    for r, (title, url) in enumerate(zip(df_excel["title"], link_series), start=1):
-                        if pd.notna(url) and str(url).strip().startswith("http"):
-                            ws.write_url(r, title_idx, str(url), string=str(title))
-                else:
-                    from openpyxl.styles import Font
-                    for r, (title, url) in enumerate(zip(df_excel["title"], link_series), start=2):
-                        if pd.notna(url) and str(url).strip().startswith("http"):
-                            cell = ws.cell(row=r, column=title_idx + 1)
-                            cell.value = str(title)
-                            cell.hyperlink = str(url)
-                            cell.font = Font(color="0000EE", underline="single")
+                # 제목만 클릭 가능 하이퍼링크 (데이터는 2행부터 시작이므로 r=2부터 보이게 → 0-based로 r=2-1=1 헤더, 데이터는 r>=2)
+                # 실제 write_url은 0-based 좌표: 헤더는 row=1, 데이터 첫 행은 row=2
+                # enumerate start=2 → Data starts at Excel row index 2 (0-based=1) but we wrote data startrow=1,
+                # so hyperlinks must start from row=2 (0-based index=2) to align correctly?
+                # Safer: iterate over df_excel with 0-based i and add +2 to row (title row 0, header row 1, data starts at 2).
+                for i, (title, url) in enumerate(zip(df_excel["title"], link_series)):
+                    if pd.notna(url) and str(url).strip().startswith("http"):
+                        ws.write_url(2 + i, title_idx, str(url), string=str(title))
+        else:
+            # openpyxl path
+            with pd.ExcelWriter(output, engine=engine) as writer:
+                df_excel.to_excel(writer, index=False, sheet_name="results", startrow=1)
+                ws = writer.sheets["results"]
 
-        output.seek(0)
+                from openpyxl.styles import Font, Alignment
+                cols = list(df_excel.columns)
+                title_idx = cols.index("title") if "title" in cols else None
+
+                # 병합 및 타이틀
+                ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(cols))
+                cell = ws.cell(row=1, column=1)
+                cell.value = title_text
+                cell.font = Font(bold=True, size=12)
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+
+                # 제목 하이퍼링크 (데이터는 2행부터 → 헤더가 2행, 데이터는 3행부터)
+                for i, (title, url) in enumerate(zip(df_excel["title"], link_series), start=3):
+                    if pd.notna(url) and str(url).strip().startswith("http"):
+                        c = ws.cell(row=i, column=title_idx + 1)
+                        c.value = str(title)
+                        c.hyperlink = str(url)
+                        c.font = Font(color="0000EE", underline="single")
+
         st.download_button(
             "엑셀(.xlsx)로 다운로드",
             data=output.getvalue(),
@@ -224,10 +260,10 @@ if run:
         )
     # -------------------------------------------------------------------
 
-    # ---------------- PDF 다운로드 (URL 제외, 제목만 링크, '발행일' 헤더 + 언론사 8자) ---------
+    # ---------------- PDF 다운로드 (첫 행 제목 + URL 제외 + 제목만 링크 + 날짜 YYYY-MM-DD) ---------
     try:
         from reportlab.lib.pagesizes import A4, landscape
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
         from reportlab.lib import colors
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.pdfbase import pdfmetrics
@@ -250,13 +286,12 @@ if run:
                 st.warning("업로드한 폰트를 등록하지 못했습니다. 기본 폰트로 진행합니다. (한글 표시가 깨질 수 있음)")
 
         styles = getSampleStyleSheet()
-        title_style = ParagraphStyle(
+        title_style_link = ParagraphStyle(
             name="TitleLink",
             parent=styles["Normal"],
             fontName=base_font_name,
             fontSize=10,
             textColor=colors.HexColor("#1155cc"),
-            underlineProportion=0.08,
             leading=14,
         )
         cell_style = ParagraphStyle(
@@ -266,20 +301,37 @@ if run:
             fontSize=9,
             leading=12,
         )
+        header_style = ParagraphStyle(
+            name="Header",
+            parent=styles["Normal"],
+            fontName=base_font_name,
+            fontSize=12,
+            leading=16,
+            spaceAfter=6,
+            textColor=colors.HexColor("#202124"),
+        )
+
+        # 상단 타이틀
+        story = [Paragraph(title_text, header_style), Spacer(1, 6)]
+
+        # 표 데이터 준비
+        df_display = df.copy()
+        if "published_at" in df_display.columns:
+            df_display["published_at"] = df_display["published_at"].map(_to_yyyymmdd)
 
         rows = []
-        header = ["제목", "언론사", "발행일"]  # ← 헤더 텍스트 변경
+        header = ["제목", "언론사", "발행일"]
         rows.append(header)
 
         for idx, row in df_display.iterrows():
             title = str(row.get("title", ""))
             url = str(df.loc[idx].get("link", "")) if "link" in df.columns else ""
             pub_full = str(row.get("publisher", ""))
-            pub_trunc = _truncate_kor(pub_full, 8)  # ← 언론사 8글자 제한
-            when = str(row.get("published_at", ""))  # 이미 YYYY-MM-DD
+            pub_trunc = _truncate_kor(pub_full, 8)
+            when = str(row.get("published_at", ""))  # YYYY-MM-DD
 
             if url.startswith("http"):
-                title_para = Paragraph(f'<link href="{url}">{title}</link>', title_style)
+                title_para = Paragraph(f'<link href="{url}">{title}</link>', title_style_link)
             else:
                 title_para = Paragraph(title, cell_style)
 
@@ -289,10 +341,8 @@ if run:
             rows.append([title_para, pub_para, when_para])
 
         buffer = io.BytesIO()
-        # 언론사 폭을 더 좁게 조정 (8자 기준 폭): [제목, 언론사, 발행일]
-        col_widths = [340, 90, 150]
         doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), leftMargin=25, rightMargin=25, topMargin=20, bottomMargin=20)
-        tbl = Table(rows, repeatRows=1, colWidths=col_widths)
+        tbl = Table(rows, repeatRows=1, colWidths=[340, 90, 150])
         tbl.setStyle(TableStyle([
             ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#f1f3f4")),
             ("TEXTCOLOR", (0,0), (-1,0), colors.HexColor("#202124")),
@@ -305,7 +355,7 @@ if run:
             ("GRID", (0,0), (-1,-1), 0.25, colors.HexColor("#dfe1e5")),
         ]))
 
-        story = [tbl]
+        story.append(tbl)
         doc.build(story)
         pdf_bytes = buffer.getvalue()
         buffer.close()
